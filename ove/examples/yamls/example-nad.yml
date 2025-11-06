@@ -1,0 +1,19 @@
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: hml-1668
+  namespace: default
+  annotations:
+    description: "107.33.224.0-24"
+spec:
+  config: |-
+    {
+      "vlanID": 1668,
+      "name": "hml-1668",
+      "netAttachDefName": "default/hml-1668",
+      "physicalNetworkName": "vmnet",
+      "cniVersion": "0.4.0",
+      "type": "ovn-k8s-cni-overlay",
+      "topology": "localnet",
+      "mtu": 8900
+    }

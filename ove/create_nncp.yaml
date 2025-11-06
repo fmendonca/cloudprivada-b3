@@ -1,0 +1,30 @@
+- name: Criar NodeNetworkConfigurationPolicy (NNCP)
+  hosts: localhost
+  gather_facts: false
+  vars:
+    nncp_name: "vmdata"
+    bridge_name: "br-ex"
+    localnet_name: "vmdata-network"
+    states: "present"
+
+  tasks:
+    - name: Criar NNCP com bridge-mapping via NMState
+      kubernetes.core.k8s:
+        api_version: nmstate.io/v1
+        kind: NodeNetworkConfigurationPolicy
+        name: "{{ nncp_name }}"
+        namespace: default  # NNCP é cluster-wide, mas o Ansible requer um namespace qualquer
+        definition:
+          apiVersion: nmstate.io/v1
+          kind: NodeNetworkConfigurationPolicy
+          metadata:
+            name: "{{ nncp_name }}"
+          spec:
+            desiredState:
+              ovn:
+                bridge-mappings:
+                  - bridge: "{{ bridge_name }}"
+                    localnet: "{{ localnet_name }}"
+                    state: "{{ states | default('present') }}"
+            nodeSelector:
+                  node-role.kubernetes.io/worker: ''

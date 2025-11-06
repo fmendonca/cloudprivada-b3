@@ -1,0 +1,30 @@
+# Ignore arquivos de ambiente
+.env
+.env.*
+env
+**/.env
+**/.env.*
+**/env
+**/env.*
+
+# Diretórios comuns
+__pycache__/
+node_modules/
+dist/
+build/
+
+# Arquivos temporários e de log
+*.log
+*.pid
+*.swp
+
+# IDEs
+.vscode/
+.idea/
+
+# Arquivos do sistema
+.DS_Store
+Thumbs.db
+
+#chave
+pull-secret.json

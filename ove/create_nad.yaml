@@ -1,0 +1,41 @@
+- name: Criar NetworkAttachmentDefinition com VLAN personalizada
+  hosts: localhost
+  gather_facts: false
+  vars:
+    vlan_id: 224                
+    nad_name: "vlan224"     
+    nad_namespace: "default"    
+    logical_switch: "vmdata-network"
+    mtu: 1400
+
+  tasks:
+    - name: Criar NAD com base em parâmetros
+      kubernetes.core.k8s:
+        api_version: k8s.cni.cncf.io/v1
+        kind: NetworkAttachmentDefinition
+        namespace: "{{ nad_namespace }}"
+        name: "{{ nad_name }}"
+        definition:
+          apiVersion: "k8s.cni.cncf.io/v1"
+          kind: NetworkAttachmentDefinition
+          metadata:
+            name: "{{ nad_name }}"
+            namespace: "{{ nad_namespace }}"
+          spec:
+            config: >
+              {{
+                {
+                  "cniVersion": "0.3.1",
+                  "type": "ovn-k8s-cni-overlay",
+                  "name": nad_name,
+                  "netAttachDefName": nad_namespace + "/" + nad_name,
+                  "topology": "layer2",
+                  "vlanID": vlan_id | int,
+                  "interfaceType": "internal",
+                  "mtu": mtu,
+                  "ipam": {},
+                  "external-ids": {
+                    "ovn.kubernetes.io/logical_switch": logical_switch
+                  }
+                } | to_json
+              }}

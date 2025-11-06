@@ -1,0 +1,45 @@
+download_url: https://console.redhat.com/api/automation-hub/v3/plugin/ansible/content/5910538-synclist/collections/artifacts/redhat-openshift-5.0.0.tar.gz
+format_version: 1.0.0
+name: openshift
+namespace: redhat
+server: https://console.redhat.com/api/automation-hub/content/5910538-synclist/
+signatures:
+- pubkey_fingerprint: 39B5D759361A97464C564A8FE1A4BD708A828AAD
+  pulp_created: '2025-06-12T22:34:48.898097Z'
+  signature: '-----BEGIN PGP SIGNATURE-----
+
+    Version: GnuPG v1
+
+
+    iQIcBAABCAAGBQJoS1X+AAoJEOGkvXCKgoqtJnsQAKeXj61NpAQ819BkdhIe5FpI
+
+    RH+I+nopEN/el8OZpQGVXxsepUyx/9hT6hujjuqjGWqe4h97xLvhTtde539mdoBN
+
+    qK1ODGRD7rYrJePN358wULRg1cz/dWjDRFXc71KuKZkFuTfy1r+Nxufp6FOxUMHJ
+
+    cyFEgUo+nCeWUP1KIvXV/mnTQHB6x5rtmCT27OXDR0H4PZ9Vaz7s8mljDg1kqMmP
+
+    fV9CWyxYCBeP335RZtISx4AS8viimb0nlpC2l9yz8cSmGDUFqC44s3+VgnpHYXmg
+
+    o1vTRmWUaC54TPBzGSvp4SFfSgPAiI8sxiinCYdKIkibX6HsplOE8qkYVf6rtIuY
+
+    ojVvaooj0SyGKTGpDeD4vMma025KAJMJWQCsxA59buisL3Xg25UqTaw8pVkYV11S
+
+    m17RglLFJ3/CxRDS8/4boyDRqxg2NpocPqi0JiHRO/VrzNAkKnKX3iyY3gaxX5zR
+
+    hGj820DZ0PWMZRcowo7cpM11/MEjcUW+zBlf4eMW/EWri5ZIIbyfnIt2hq4dTD9h
+
+    0EGLdXXAnLJv2HTii11XE1ty3fbcGusIQaD2LG7hVG5PkO0KL5DtTKNEYSljWgbu
+
+    lxsjWkHnMeaWoyFRTgMxTAoC8MespAvsdRmC1MsO03cv1te7IJK2Z/dKzoWFmN+r
+
+    Qd+nl5XD63QrwBpsTEbX
+
+    =Hx3W
+
+    -----END PGP SIGNATURE-----
+
+    '
+  signing_service: null
+version: 5.0.0
+version_url: /api/automation-hub/content/5910538-synclist/v3/plugin/ansible/content/5910538-synclist/collections/index/redhat/openshift/versions/5.0.0/

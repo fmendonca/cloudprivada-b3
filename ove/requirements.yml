@@ -1,0 +1,10 @@
+---
+collections:
+  - name: redhat.openshift
+    version: 5.0.0
+    source: redhat_sync
+  - name: redhat.openshift_virtualization
+    version: 2.2.3
+    source: redhat_sync
+  - name: community.general
+    source: community

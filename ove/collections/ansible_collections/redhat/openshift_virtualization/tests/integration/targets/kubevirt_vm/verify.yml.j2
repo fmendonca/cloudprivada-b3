@@ -1,0 +1,50 @@
+---
+- name: Verify creation with existing VM
+  connection: local
+  gather_facts: false
+  hosts: localhost
+  tasks:
+    - name: Create a VM
+      redhat.openshift_virtualization.kubevirt_vm:
+        name: testvm
+        namespace: {{ NAMESPACE }}
+        labels:
+          app: test
+      register: recreate
+    - name: Assert module reported no or expected changes
+      ansible.builtin.assert:
+        that:
+          - >-
+            not recreate.changed or
+            recreate.changed and
+            recreate.method == "update" and
+            recreate.diff.before.metadata.annotations.get('kubemacpool.io/transaction-timestamp') and
+            not recreate.diff.after.metadata.annotations
+
+- name: Delete VM
+  connection: local
+  gather_facts: false
+  hosts: localhost
+  tasks:
+    - name: Delete a VM
+      redhat.openshift_virtualization.kubevirt_vm:
+        name: testvm
+        namespace: {{ NAMESPACE }}
+        state: absent
+        wait: true
+
+- name: Verify VM deletion
+  connection: local
+  gather_facts: false
+  hosts: localhost
+  tasks:
+    - name: Delete a VM
+      redhat.openshift_virtualization.kubevirt_vm:
+        name: testvm
+        namespace: {{ NAMESPACE }}
+        state: absent
+      register: delete
+    - name: Assert module reported no changes
+      ansible.builtin.assert:
+        that:
+          - not delete.changed

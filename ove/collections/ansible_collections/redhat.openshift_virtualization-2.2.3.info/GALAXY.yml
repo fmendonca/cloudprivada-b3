@@ -1,0 +1,45 @@
+download_url: https://console.redhat.com/api/automation-hub/v3/plugin/ansible/content/5910538-synclist/collections/artifacts/redhat-openshift_virtualization-2.2.3.tar.gz
+format_version: 1.0.0
+name: openshift_virtualization
+namespace: redhat
+server: https://console.redhat.com/api/automation-hub/content/5910538-synclist/
+signatures:
+- pubkey_fingerprint: 39B5D759361A97464C564A8FE1A4BD708A828AAD
+  pulp_created: '2025-06-04T18:15:21.196503Z'
+  signature: '-----BEGIN PGP SIGNATURE-----
+
+    Version: GnuPG v1
+
+
+    iQIcBAABCAAGBQJoQI0vAAoJEOGkvXCKgoqtT88QAKWfDki5PFheNf1VUf3QWbh4
+
+    w9U/d5UEInXVYoBtl2b4085mFuvpSND0JRjPmA8IvBjRrbJu0708ytm0DlEs1VPQ
+
+    ufJjU+oFsJ257NKE38iLc8mDSnqp9DBfn7/dndXyBPr7UcsqwAqY3EQbyDm+h5zY
+
+    gGUkNs48i7ARtZUKb/ypuLtmf0LPhJMGoAzspZZXl9ih3tDODSanCqxDoF4hkcNn
+
+    Do4X63newZDAe9XTnW0sxlAPokWNg084Dzk9+hrlAZ9TzbgZtr19TJiyQcdjRzCs
+
+    YV//dc6TWsjgv2+R5yUpeT18PEsd04xTogHesOfkhgJzpkYU3w8kQRPBu62ff1yc
+
+    MZqedOaWavk8OlLvzb1SBUzSexCR4nuRyt0DxmVlKSGcwGMVXy4DoVWJ71yHjImF
+
+    A7pKadZ0niRYjAm1W1fyzkLjvyxPV6zM43zpEaGKzWpLTUnvDT50eoupGLQ+WLcK
+
+    xrWFe/qhpg0dlBQxxlAmJN24FukerFhTkgdzJb8Jc49THBB4Jk3LVMcFcesqTI1v
+
+    Fj49lowlAPkb8nI0M02Qrw/lGP6arWOy0k2kxoOqaiFXFOxNRSltELbgXU0n9WX4
+
+    p25fotEy7b2sWEfRHzFyemOIEIvKLZuj+7mECb09cMMhUKEdEuseh7QVyDbr8r52
+
+    oEPk7ZKXvUZsXcSrV/PQ
+
+    =DaAq
+
+    -----END PGP SIGNATURE-----
+
+    '
+  signing_service: null
+version: 2.2.3
+version_url: /api/automation-hub/content/5910538-synclist/v3/plugin/ansible/content/5910538-synclist/collections/index/redhat/openshift_virtualization/versions/2.2.3/

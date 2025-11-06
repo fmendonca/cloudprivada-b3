@@ -1,0 +1,102 @@
+{
+  "name": "Deploy VM OVE",
+  "description": "New VM",
+  "spec": [
+    {
+      "type": "text",
+      "question_name": "VM Name",
+      "question_description": "Name of the virtual machine",
+      "variable": "vm_name",
+      "required": true,
+      "default": "fedo1"
+    },
+    {
+      "type": "text",
+      "question_name": "Namespace",
+      "question_description": "Kubernetes namespace or libvirt pool",
+      "variable": "vm_namespace",
+      "required": true,
+      "default": "vms"
+    },
+    {
+      "type": "text",
+      "question_name": "Username",
+      "question_description": "Default user of the VM",
+      "variable": "vm_user",
+      "required": true,
+      "default": "fedora"
+    },
+    {
+      "type": "text",
+      "question_name": "Password",
+      "question_description": "Password for the VM user",
+      "variable": "vm_password",
+      "required": true,
+      "default": "123redhat"
+    },
+    {
+      "type": "text",
+      "question_name": "Memory",
+      "question_description": "Amount of RAM for the VM (e.g., 2Gi)",
+      "variable": "vm_memory",
+      "required": true,
+      "default": "2Gi"
+    },
+    {
+      "type": "text",
+      "question_name": "CPU Cores",
+      "question_description": "Number of CPU cores",
+      "variable": "vm_cores",
+      "required": true,
+      "default": "2"
+    },
+    {
+      "type": "text",
+      "question_name": "Disk Size",
+      "question_description": "Size of the VM disk (e.g., 30Gi)",
+      "variable": "vm_storage",
+      "required": true,
+      "default": "30Gi"
+    },
+    {
+      "type": "text",
+      "question_name": "Network Attachment",
+      "question_description": "Network attachment name and namespace",
+      "variable": "vm_network",
+      "required": true,
+      "default": "default/vlan224"
+    },
+    {
+      "type": "text",
+      "question_name": "Data Source Name",
+      "question_description": "Template or data source name",
+      "variable": "vm_datasource_name",
+      "required": true,
+      "default": "fedora"
+    },
+    {
+      "type": "text",
+      "question_name": "Flavor",
+      "question_description": "VM flavor (e.g., small, medium)",
+      "variable": "vm_flavor",
+      "required": true,
+      "default": "small"
+    },
+    {
+      "type": "text",
+      "question_name": "Operating System",
+      "question_description": "Operating system type",
+      "variable": "vm_os",
+      "required": true,
+      "default": "fedora"
+    },
+    {
+      "type": "text",
+      "question_name": "Workload Type",
+      "question_description": "Type of workload (e.g., server, desktop)",
+      "variable": "vm_workload",
+      "required": true,
+      "default": "server"
+    }
+  ]
+}
