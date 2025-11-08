@@ -1,0 +1,102 @@
+---
+- name: Create a VM on OpenShift Virtualization
+  hosts: localhost
+  gather_facts: false
+ 
+  vars:
+    # VM details
+    vm_name: my-test-vm
+    vm_project: default
+    vm_disk_size: 10Gi
+    vm_memory_size: 2Gi
+    vm_cpu_cores: 2
+    vm_cpu_sockets: 1
+    vm_cpu_threads: 1
+
+    # Templates and images
+    template: rhel8
+    template_project: openshift-virtualization-os-images
+    template_flavor: small
+    template_workload: server
+    template_namespace: openshift
+    template_revision: "1"
+    template_version: v1
+
+    # Network
+    vm_network_nad: vlan1000
+
+    # Cloud-init / Access
+    cloud_init_password: redhat
+
+    # API access
+    validate_certs: false
+
+  tasks:
+    - name: Create virtual machine
+      redhat.openshift_virtualization.kubevirt_vm:
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_project }}"
+        running: true
+        validate_certs: "{{ validate_certs }}"
+        state: present
+        annotations:
+          vm.kubevirt.io/flavor: "{{ template_flavor }}"
+          vm.kubevirt.io/os: "{{ template }}"
+          vm.kubevirt.io/workload: "{{ template_workload }}"
+        labels:
+          app: "{{ vm_name }}"
+          Backup: Com-Backup
+          kubevirt.io/dynamic-credentials-support: 'true'
+          vm.kubevirt.io/template: "{{ template }}-{{ template_workload }}-{{ template_flavor }}"
+          vm.kubevirt.io/template.namespace: "{{ template_namespace }}"
+          vm.kubevirt.io/template.revision: "{{ template_revision }}"
+          vm.kubevirt.io/template.version: "{{ template_version }}"
+        data_volume_templates:
+          - kind: 'DataVolume'
+            metadata:
+              name: "{{ vm_name }}"
+            spec:
+              sourceRef:
+                kind: 'DataSource'
+                name: "{{ template }}"
+                namespace: "{{ template_project }}"
+              storage:
+                resources:
+                  requests:
+                    storage: "{{ vm_disk_size }}"
+        spec:
+          domain:
+            cpu:
+              cores: "{{ vm_cpu_cores }}"
+              sockets: "{{ vm_cpu_sockets }}"
+              threads: "{{ vm_cpu_threads }}"
+            devices:
+              disks:
+                - disk:
+                    bus: 'virtio'
+                  name: 'rootdisk'
+                - disk:
+                    bus: 'virtio'
+                  name: 'cloudinitdisk'
+              interfaces:
+                - bridge: {}
+                  model: 'virtio'
+                  name: "default"
+            memory:
+              guest: "{{ vm_memory_size }}"
+          networks:
+            - name: default
+              multus:
+                networkName: "{{ vm_network_nad }}"
+          terminationGracePeriodSeconds: 180
+          volumes:
+            - name: 'rootdisk'
+              dataVolume:
+                name: "{{ vm_name }}"
+            - name: 'cloudinitdisk'
+              cloudInitNoCloud:
+                userData: |
+                  #cloud-config
+                  user: cloud-user
+                  password: {{ cloud_init_password }}
+                  chpasswd: { expire: False }

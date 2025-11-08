@@ -1,0 +1,16 @@
+---
+- name: Delete VM from OpenShift Virtualization
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    validate_certs: false
+
+  tasks:
+    - name: Delete VM
+      redhat.openshift_virtualization.kubevirt_vm:
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_project }}"
+        running: true
+        validate_certs: "{{ validate_certs }}"
+        state: absent
