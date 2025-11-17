@@ -1,0 +1,142 @@
+---
+- name: Verificar recursos atuais de VMs
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    validate_certs: false
+
+  tasks:
+    - name: Validar parâmetros de entrada
+      ansible.builtin.set_fact:
+        target_namespace: "{{ target_namespace | default('') }}"
+        show_stopped_vms: "{{ show_stopped_vms | default(true) | bool }}"
+        show_detailed_info: "{{ show_detailed_info | default(false) | bool }}"
+
+    - name: Listar VMs em namespace específico
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ target_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: vms_in_namespace
+      when: target_namespace | length > 0
+
+    - name: Listar VMs em todos os namespaces
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        validate_certs: "{{ validate_certs }}"
+      register: all_vms
+      when: target_namespace | length == 0
+
+    - name: Definir lista de VMs para processamento
+      ansible.builtin.set_fact:
+        vm_list: "{{ vms_in_namespace.resources if target_namespace | length > 0 else all_vms.resources }}"
+
+    - name: Filtrar VMs paradas se necessário
+      ansible.builtin.set_fact:
+        filtered_vm_list: "{{ vm_list | selectattr('status.ready', 'defined') | selectattr('status.ready', 'equalto', true) | list if not show_stopped_vms else vm_list }}"
+
+    - name: Processar informações das VMs
+      ansible.builtin.set_fact:
+        vm_resources: "{{ vm_resources | default([]) + [vm_info] }}"
+      vars:
+        vm_info:
+          name: "{{ item.metadata.name }}"
+          namespace: "{{ item.metadata.namespace }}"
+          cpu_cores: "{{ item.spec.template.spec.domain.cpu.cores | default(1) }}"
+          cpu_sockets: "{{ item.spec.template.spec.domain.cpu.sockets | default(1) }}"
+          cpu_threads: "{{ item.spec.template.spec.domain.cpu.threads | default(1) }}"
+          total_vcpus: "{{ (item.spec.template.spec.domain.cpu.cores | default(1) | int) * (item.spec.template.spec.domain.cpu.sockets | default(1) | int) * (item.spec.template.spec.domain.cpu.threads | default(1) | int) }}"
+          memory_request: "{{ item.spec.template.spec.domain.resources.requests.memory | default('N/A') }}"
+          memory_limit: "{{ item.spec.template.spec.domain.resources.limits.memory | default(item.spec.template.spec.domain.resources.requests.memory | default('N/A')) }}"
+          running: "{{ item.status.ready | default(false) }}"
+          created: "{{ item.metadata.creationTimestamp | default('N/A') }}"
+      loop: "{{ filtered_vm_list }}"
+
+    - name: Agrupar VMs por namespace
+      ansible.builtin.set_fact:
+        vms_by_namespace: "{{ vm_resources | groupby('namespace') | list }}"
+
+    - name: Exibir resumo geral
+      ansible.builtin.debug:
+        msg:
+          - "=== RESUMO GERAL ==="
+          - "Total de VMs encontradas: {{ vm_list | length }}"
+          - "VMs em execução: {{ vm_list | selectattr('status.ready', 'defined') | selectattr('status.ready', 'equalto', true) | list | length }}"
+          - "VMs paradas: {{ vm_list | length - (vm_list | selectattr('status.ready', 'defined') | selectattr('status.ready', 'equalto', true) | list | length) }}"
+          - "Namespaces: {{ vms_by_namespace | map('first') | list | join(', ') }}"
+          - "Filtro aplicado: {{ 'Namespace: ' + target_namespace if target_namespace | length > 0 else 'Todos os namespaces' }}"
+
+    - name: Exibir recursos por namespace (resumido)
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "=== NAMESPACE: {{ namespace_name }} ==="
+          - "VMs neste namespace: {{ namespace_vms | length }}"
+          - "{{ vm_summary }}"
+      vars:
+        namespace_name: "{{ item.0 }}"
+        namespace_vms: "{{ item.1 }}"
+        vm_summary: "{{ namespace_vms | map('regex_replace', '^.*$', vm_line) | list }}"
+        vm_line: "{{ item.name }} | {{ item.total_vcpus }}vCPU | {{ item.memory_request }} | {{ 'Running' if item.running else 'Stopped' }}"
+      loop: "{{ vms_by_namespace }}"
+      when: not show_detailed_info
+
+    - name: Exibir recursos detalhados por VM
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "=== VM: {{ item.namespace }}/{{ item.name }} ==="
+          - "Status: {{ 'Running' if item.running else 'Stopped' }}"
+          - "CPU:"
+          - "  Cores: {{ item.cpu_cores }}"
+          - "  Sockets: {{ item.cpu_sockets }}"
+          - "  Threads: {{ item.cpu_threads }}"
+          - "  Total vCPUs: {{ item.total_vcpus }}"
+          - "Memória:"
+          - "  Request: {{ item.memory_request }}"
+          - "  Limit: {{ item.memory_limit }}"
+          - "Criada em: {{ item.created }}"
+      loop: "{{ vm_resources | default([]) }}"
+      when: show_detailed_info
+
+    - name: Calcular estatísticas de recursos
+      ansible.builtin.set_fact:
+        total_vcpus: "{{ vm_resources | map(attribute='total_vcpus') | map('int') | sum }}"
+        running_vcpus: "{{ vm_resources | selectattr('running', 'equalto', true) | map(attribute='total_vcpus') | map('int') | sum }}"
+        unique_namespaces: "{{ vm_resources | map(attribute='namespace') | unique | list | length }}"
+
+    - name: Exibir estatísticas finais
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "=== ESTATÍSTICAS DE RECURSOS ==="
+          - "Total de vCPUs alocadas: {{ total_vcpus }}"
+          - "vCPUs em VMs rodando: {{ running_vcpus }}"
+          - "vCPUs em VMs paradas: {{ total_vcpus | int - running_vcpus | int }}"
+          - "Namespaces únicos: {{ unique_namespaces }}"
+          - ""
+          - "=== COMANDOS ÚTEIS ==="
+          - "Listar todas as VMs:"
+          - "  oc get vm -A"
+          - ""
+          - "Ver recursos de uma VM específica:"
+          - "  oc describe vm <vm-name> -n <namespace>"
+          - ""
+          - "Verificar VMs em execução:"
+          - "  oc get vmi -A"
+
+    - name: Gerar relatório em formato tabular
+      ansible.builtin.debug:
+        msg: |
+          
+          === RELATÓRIO TABULAR ===
+          {{ '%-20s %-15s %-8s %-10s %-10s %-10s' | format('VM NAME', 'NAMESPACE', 'vCPUs', 'MEMORY', 'STATUS', 'CREATED') }}
+          {{ '-' * 80 }}
+          {% for vm in vm_resources %}
+          {{ '%-20s %-15s %-8s %-10s %-10s %-10s' | format(vm.name[:19], vm.namespace[:14], vm.total_vcpus | string, vm.memory_request[:9], ('Running' if vm.running else 'Stopped')[:9], vm.created[:10]) }}
+          {% endfor %}
+      when: vm_resources | default([]) | length > 0

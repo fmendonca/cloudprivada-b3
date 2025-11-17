@@ -1,0 +1,99 @@
+---
+- name: Delete Multiple VMs from OpenShift Virtualization
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    validate_certs: false
+    force_delete: false
+    wait_for_deletion: true
+    deletion_timeout: 300
+
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - vm_names is defined
+          - vm_names | length > 0
+          - vm_project is defined
+          - vm_project | length > 0
+        fail_msg: "Required variables vm_names (list) and vm_project (string) must be defined"
+        success_msg: "Required variables validated successfully"
+
+    - name: Parse VM names if provided as string
+      ansible.builtin.set_fact:
+        vm_list: "{{ vm_names.split(',') | map('trim') | list if vm_names is string else vm_names }}"
+
+    - name: Display VMs to be deleted
+      ansible.builtin.debug:
+        msg: 
+          - "Namespace: {{ vm_project }}"
+          - "VMs to delete: {{ vm_list | join(', ') }}"
+          - "Force delete: {{ force_delete }}"
+          - "Wait for deletion: {{ wait_for_deletion }}"
+
+    - name: Check if VMs exist before deletion
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ item }}"
+        namespace: "{{ vm_project }}"
+        validate_certs: "{{ validate_certs }}"
+      register: vm_check
+      loop: "{{ vm_list }}"
+      ignore_errors: true
+
+    - name: List existing VMs
+      ansible.builtin.set_fact:
+        existing_vms: "{{ vm_check.results | selectattr('resources', 'defined') | selectattr('resources', '!=', []) | map(attribute='item') | list }}"
+        missing_vms: "{{ vm_check.results | rejectattr('resources', 'defined') | map(attribute='item') | list + vm_check.results | selectattr('resources', 'defined') | selectattr('resources', '==', []) | map(attribute='item') | list }}"
+
+    - name: Display VM status
+      ansible.builtin.debug:
+        msg:
+          - "Existing VMs: {{ existing_vms | join(', ') if existing_vms | length > 0 else 'None' }}"
+          - "Missing VMs: {{ missing_vms | join(', ') if missing_vms | length > 0 else 'None' }}"
+
+    - name: Stop VMs before deletion (if not force delete)
+      redhat.openshift_virtualization.kubevirt_vm:
+        name: "{{ item }}"
+        namespace: "{{ vm_project }}"
+        running: false
+        validate_certs: "{{ validate_certs }}"
+        wait: true
+        wait_timeout: 120
+      loop: "{{ existing_vms }}"
+      when: 
+        - not force_delete
+        - existing_vms | length > 0
+      ignore_errors: true
+
+    - name: Delete VMs
+      redhat.openshift_virtualization.kubevirt_vm:
+        name: "{{ item }}"
+        namespace: "{{ vm_project }}"
+        validate_certs: "{{ validate_certs }}"
+        state: absent
+        wait: "{{ wait_for_deletion }}"
+        wait_timeout: "{{ deletion_timeout }}"
+      loop: "{{ existing_vms }}"
+      register: deletion_results
+      when: existing_vms | length > 0
+
+    - name: Summary of deletion results
+      ansible.builtin.debug:
+        msg:
+          - "=== DELETION SUMMARY ==="
+          - "Namespace: {{ vm_project }}"
+          - "Successfully deleted: {{ deletion_results.results | selectattr('changed', 'equalto', true) | map(attribute='item') | list | join(', ') if deletion_results.results is defined else 'None' }}"
+          - "Failed to delete: {{ deletion_results.results | selectattr('failed', 'equalto', true) | map(attribute='item') | list | join(', ') if deletion_results.results is defined else 'None' }}"
+          - "VMs not found: {{ missing_vms | join(', ') if missing_vms | length > 0 else 'None' }}"
+          - "Total VMs processed: {{ vm_list | length }}"
+
+    - name: Fail if any deletion failed
+      ansible.builtin.fail:
+        msg: "Some VM deletions failed. Check the summary above for details."
+      when: 
+        - deletion_results.results is defined
+        - deletion_results.results | selectattr('failed', 'equalto', true) | list | length > 0

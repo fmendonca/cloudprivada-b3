@@ -1,0 +1,205 @@
+---
+- name: Criar Snapshot de VM no OpenShift Virtualization
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    validate_certs: false
+    wait_for_completion: true
+    snapshot_timeout: 600
+
+  tasks:
+    - name: Validar variáveis obrigatórias
+      ansible.builtin.assert:
+        that:
+          - vm_name is defined
+          - vm_name | length > 0
+          - vm_namespace is defined
+          - vm_namespace | length > 0
+          - snapshot_name is defined
+          - snapshot_name | length > 0
+        fail_msg: "Variáveis obrigatórias não definidas: vm_name, vm_namespace, snapshot_name"
+        success_msg: "Validação de variáveis concluída com sucesso"
+
+    - name: Definir nome do snapshot com timestamp se necessário
+      ansible.builtin.set_fact:
+        final_snapshot_name: "{{ snapshot_name }}-{{ ansible_date_time.epoch }}"
+      when: add_timestamp | default(false) | bool
+
+    - name: Usar nome do snapshot original
+      ansible.builtin.set_fact:
+        final_snapshot_name: "{{ snapshot_name }}"
+      when: not (add_timestamp | default(false) | bool)
+
+    - name: Exibir configuração do snapshot
+      ansible.builtin.debug:
+        msg:
+          - "=== CONFIGURAÇÃO DO SNAPSHOT ==="
+          - "VM: {{ vm_name }}"
+          - "Namespace: {{ vm_namespace }}"
+          - "Snapshot: {{ final_snapshot_name }}"
+          - "Descrição: {{ snapshot_description | default('Snapshot criado via Ansible') }}"
+          - "Aguardar conclusão: {{ wait_for_completion }}"
+          - "Timeout: {{ snapshot_timeout }}s"
+
+    - name: Verificar se a VM existe
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: vm_check
+
+    - name: Falhar se VM não existe
+      ansible.builtin.fail:
+        msg: "VM '{{ vm_name }}' não encontrada no namespace '{{ vm_namespace }}'"
+      when: vm_check.resources | length == 0
+
+    - name: Obter status da VM
+      ansible.builtin.set_fact:
+        vm_status: "{{ vm_check.resources[0].status | default({}) }}"
+        vm_running: "{{ vm_check.resources[0].status.ready | default(false) }}"
+
+    - name: Exibir status da VM
+      ansible.builtin.debug:
+        msg:
+          - "Status da VM: {{ 'Running' if vm_running else 'Stopped' }}"
+          - "Ready: {{ vm_running }}"
+
+    - name: Verificar se snapshot já existe
+      kubernetes.core.k8s_info:
+        api_version: snapshot.kubevirt.io/v1beta1
+        kind: VirtualMachineSnapshot
+        name: "{{ final_snapshot_name }}"
+        namespace: "{{ vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: existing_snapshot
+
+    - name: Avisar se snapshot já existe
+      ansible.builtin.debug:
+        msg: "Snapshot '{{ final_snapshot_name }}' já existe. Será recriado."
+      when: existing_snapshot.resources | length > 0
+
+    - name: Deletar snapshot existente se necessário
+      kubernetes.core.k8s:
+        api_version: snapshot.kubevirt.io/v1beta1
+        kind: VirtualMachineSnapshot
+        name: "{{ final_snapshot_name }}"
+        namespace: "{{ vm_namespace }}"
+        state: absent
+        validate_certs: "{{ validate_certs }}"
+        wait: true
+        wait_timeout: 120
+      when: 
+        - existing_snapshot.resources | length > 0
+        - overwrite_existing | default(false) | bool
+
+    - name: Falhar se snapshot existe e overwrite não está habilitado
+      ansible.builtin.fail:
+        msg: "Snapshot '{{ final_snapshot_name }}' já existe. Use 'Sobrescrever Snapshot Existente' para recriá-lo."
+      when:
+        - existing_snapshot.resources | length > 0
+        - not (overwrite_existing | default(false) | bool)
+
+    - name: Criar VirtualMachineSnapshot
+      kubernetes.core.k8s:
+        api_version: snapshot.kubevirt.io/v1beta1
+        kind: VirtualMachineSnapshot
+        namespace: "{{ vm_namespace }}"
+        name: "{{ final_snapshot_name }}"
+        definition:
+          apiVersion: snapshot.kubevirt.io/v1beta1
+          kind: VirtualMachineSnapshot
+          metadata:
+            name: "{{ final_snapshot_name }}"
+            namespace: "{{ vm_namespace }}"
+            labels:
+              vm-name: "{{ vm_name }}"
+              created-by: "ansible-automation"
+              snapshot-type: "{{ snapshot_type | default('manual') }}"
+            annotations:
+              description: "{{ snapshot_description | default('Snapshot criado via Ansible Automation Platform') }}"
+              created-at: "{{ ansible_date_time.iso8601 }}"
+              vm-status: "{{ 'running' if vm_running else 'stopped' }}"
+          spec:
+            source:
+              apiVersion: kubevirt.io/v1
+              kind: VirtualMachine
+              name: "{{ vm_name }}"
+            deletionPolicy: "{{ deletion_policy | default('Retain') }}"
+        validate_certs: "{{ validate_certs }}"
+        wait: "{{ wait_for_completion }}"
+        wait_condition:
+          type: Ready
+          status: "True"
+        wait_timeout: "{{ snapshot_timeout }}"
+      register: snapshot_result
+
+    - name: Aguardar conclusão do snapshot (se habilitado)
+      kubernetes.core.k8s_info:
+        api_version: snapshot.kubevirt.io/v1beta1
+        kind: VirtualMachineSnapshot
+        name: "{{ final_snapshot_name }}"
+        namespace: "{{ vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+        wait_condition:
+          type: Ready
+          status: "True"
+        wait_timeout: "{{ snapshot_timeout }}"
+      register: snapshot_status
+      when: wait_for_completion
+
+    - name: Obter detalhes do snapshot criado
+      kubernetes.core.k8s_info:
+        api_version: snapshot.kubevirt.io/v1beta1
+        kind: VirtualMachineSnapshot
+        name: "{{ final_snapshot_name }}"
+        namespace: "{{ vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: final_snapshot
+
+    - name: Exibir resultado da operação
+      ansible.builtin.debug:
+        msg:
+          - "=== RESULTADO DO SNAPSHOT ==="
+          - "Snapshot criado com sucesso!"
+          - "Nome: {{ final_snapshot_name }}"
+          - "Namespace: {{ vm_namespace }}"
+          - "VM: {{ vm_name }}"
+          - "Status: {{ final_snapshot.resources[0].status.phase | default('Unknown') if final_snapshot.resources | length > 0 else 'Created' }}"
+          - "Timestamp: {{ ansible_date_time.iso8601 }}"
+
+    - name: Exibir comandos úteis
+      ansible.builtin.debug:
+        msg:
+          - "=== COMANDOS ÚTEIS ==="
+          - "Verificar status:"
+          - "  oc get vmsnapshot {{ final_snapshot_name }} -n {{ vm_namespace }}"
+          - ""
+          - "Ver detalhes:"
+          - "  oc describe vmsnapshot {{ final_snapshot_name }} -n {{ vm_namespace }}"
+          - ""
+          - "Listar todos os snapshots da VM:"
+          - "  oc get vmsnapshot -n {{ vm_namespace }} -l vm-name={{ vm_name }}"
+          - ""
+          - "Para restaurar (criar VMRestore):"
+          - "  oc apply -f vmrestore-{{ final_snapshot_name }}.yaml"
+
+    - name: Listar snapshots existentes da VM
+      kubernetes.core.k8s_info:
+        api_version: snapshot.kubevirt.io/v1beta1
+        kind: VirtualMachineSnapshot
+        namespace: "{{ vm_namespace }}"
+        label_selectors:
+          - "vm-name={{ vm_name }}"
+        validate_certs: "{{ validate_certs }}"
+      register: vm_snapshots
+
+    - name: Exibir snapshots existentes
+      ansible.builtin.debug:
+        msg:
+          - "=== SNAPSHOTS EXISTENTES PARA {{ vm_name }} ==="
+          - "{{ vm_snapshots.resources | map(attribute='metadata.name') | list | join(', ') if vm_snapshots.resources | length > 0 else 'Nenhum snapshot encontrado' }}"
+          - "Total: {{ vm_snapshots.resources | length }}"

@@ -1,0 +1,248 @@
+---
+- name: Adicionar Network Adapter em VM no OpenShift Virtualization
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    validate_certs: false
+
+  tasks:
+    - name: Validar variáveis obrigatórias
+      ansible.builtin.assert:
+        that:
+          - vm_name is defined
+          - vm_namespace is defined
+          - network_name is defined
+        fail_msg: "Variáveis obrigatórias não definidas: vm_name, vm_namespace, network_name"
+        success_msg: "Validação de variáveis concluída com sucesso"
+
+    - name: Converter variáveis para string se vierem como lista
+      ansible.builtin.set_fact:
+        vm_name_str: "{{ vm_name | first if vm_name is iterable and vm_name is not string else vm_name }}"
+        vm_namespace_str: "{{ vm_namespace | first if vm_namespace is iterable and vm_namespace is not string else vm_namespace }}"
+        network_name_str: "{{ network_name | first if network_name is iterable and network_name is not string else network_name }}"
+        interface_name_str: "{{ interface_name | first if interface_name is defined and interface_name is iterable and interface_name is not string else interface_name | default('') }}"
+        network_model_str: "{{ network_model | first if network_model is defined and network_model is iterable and network_model is not string else network_model | default('virtio') }}"
+        interface_type_str: "{{ interface_type | first if interface_type is defined and interface_type is iterable and interface_type is not string else interface_type | default('bridge') }}"
+
+    - name: Definir configurações finais
+      ansible.builtin.set_fact:
+        final_vm_name: "{{ vm_name_str }}"
+        final_vm_namespace: "{{ vm_namespace_str }}"
+        final_network_name: "{{ network_name_str }}"
+        final_network_model: "{{ network_model_str }}"
+        final_interface_type: "{{ interface_type_str }}"
+
+    - name: Verificar se NetworkAttachmentDefinition existe
+      kubernetes.core.k8s_info:
+        api_version: k8s.cni.cncf.io/v1
+        kind: NetworkAttachmentDefinition
+        name: "{{ final_network_name }}"
+        namespace: "{{ final_vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: nad_check
+
+    - name: Falhar se NAD não existe
+      ansible.builtin.fail:
+        msg: |
+          NetworkAttachmentDefinition '{{ final_network_name }}' não encontrado no namespace '{{ final_vm_namespace }}'
+          Use o playbook 'list_available_networks.yml' para ver redes disponíveis.
+      when: nad_check.resources | length == 0
+
+    - name: Exibir informações do NAD encontrado
+      ansible.builtin.debug:
+        msg:
+          - "=== NETWORK ATTACHMENT DEFINITION ENCONTRADO ==="
+          - "Nome: {{ nad_check.resources[0].metadata.name }}"
+          - "Namespace: {{ nad_check.resources[0].metadata.namespace }}"
+
+    - name: Obter configuração atual da VM
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ final_vm_name }}"
+        namespace: "{{ final_vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: vm_check
+
+    - name: Falhar se VM não existe
+      ansible.builtin.fail:
+        msg: "VM '{{ final_vm_name }}' não encontrada no namespace '{{ final_vm_namespace }}'"
+      when: vm_check.resources | length == 0
+
+    - name: Extrair configuração da VM
+      ansible.builtin.set_fact:
+        current_vm: "{{ vm_check.resources[0] }}"
+        current_interfaces: "{{ vm_check.resources[0].spec.template.spec.domain.devices.interfaces | default([]) }}"
+        current_networks: "{{ vm_check.resources[0].spec.template.spec.networks | default([]) }}"
+
+    - name: Gerar nome da interface automaticamente se não fornecido
+      ansible.builtin.set_fact:
+        final_interface_name: "{{ interface_name_str if interface_name_str | length > 0 else 'nic-' ~ (current_interfaces | length + 1) }}"
+
+    - name: Exibir configuração da rede
+      ansible.builtin.debug:
+        msg:
+          - "=== CONFIGURACAO DO NETWORK ADAPTER ==="
+          - "VM: {{ final_vm_name }}"
+          - "Namespace: {{ final_vm_namespace }}"
+          - "Nome da Interface: {{ final_interface_name }}"
+          - "Network (NAD): {{ final_network_name }}"
+          - "Model: {{ final_network_model }}"
+          - "Type: {{ final_interface_type }}"
+          - "Total de interfaces atuais: {{ current_interfaces | length }}"
+
+    - name: Verificar se interface já existe
+      ansible.builtin.set_fact:
+        interface_exists: "{{ current_interfaces | selectattr('name', 'equalto', final_interface_name) | list | length > 0 }}"
+
+    - name: Falhar se interface já existe
+      ansible.builtin.fail:
+        msg: "Interface '{{ final_interface_name }}' já existe na VM '{{ final_vm_name }}'"
+      when: interface_exists
+
+    - name: Preparar definição da nova interface
+      ansible.builtin.set_fact:
+        new_interface_entry: >-
+          {%- if final_interface_type == 'bridge' -%}
+          {
+            "name": "{{ final_interface_name }}",
+            "bridge": {},
+            "model": "{{ final_network_model }}"
+          }
+          {%- elif final_interface_type == 'masquerade' -%}
+          {
+            "name": "{{ final_interface_name }}",
+            "masquerade": {},
+            "model": "{{ final_network_model }}"
+          }
+          {%- elif final_interface_type == 'sriov' -%}
+          {
+            "name": "{{ final_interface_name }}",
+            "sriov": {}
+          }
+          {%- else -%}
+          {
+            "name": "{{ final_interface_name }}",
+            "bridge": {},
+            "model": "{{ final_network_model }}"
+          }
+          {%- endif -%}
+
+    - name: Converter string JSON para objeto
+      ansible.builtin.set_fact:
+        new_interface: "{{ new_interface_entry | from_json }}"
+
+    - name: Preparar definição da nova rede
+      ansible.builtin.set_fact:
+        new_network:
+          name: "{{ final_interface_name }}"
+          multus:
+            networkName: "{{ final_network_name }}"
+
+    - name: Adicionar nova interface e rede às listas
+      ansible.builtin.set_fact:
+        updated_interfaces: "{{ current_interfaces + [new_interface] }}"
+        updated_networks: "{{ current_networks + [new_network] }}"
+
+    - name: Extrair spec completo da VM preservando estrutura
+      ansible.builtin.set_fact:
+        vm_spec: "{{ current_vm.spec }}"
+
+    - name: Atualizar VM com novo network adapter (preservando runStrategy)
+      kubernetes.core.k8s:
+        state: present
+        validate_certs: "{{ validate_certs }}"
+        definition:
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: "{{ final_vm_name }}"
+            namespace: "{{ final_vm_namespace }}"
+            labels: "{{ current_vm.metadata.labels | default({}) }}"
+            annotations: "{{ current_vm.metadata.annotations | default({}) }}"
+          spec:
+            runStrategy: "{{ vm_spec.runStrategy | default(omit) }}"
+            running: "{{ omit }}"
+            instancetype: "{{ vm_spec.instancetype | default(omit) }}"
+            preference: "{{ vm_spec.preference | default(omit) }}"
+            dataVolumeTemplates: "{{ vm_spec.dataVolumeTemplates | default(omit) }}"
+            template:
+              metadata:
+                labels: "{{ vm_spec.template.metadata.labels | default({}) }}"
+                annotations: "{{ vm_spec.template.metadata.annotations | default(omit) }}"
+              spec:
+                domain:
+                  devices:
+                    disks: "{{ vm_spec.template.spec.domain.devices.disks | default([]) }}"
+                    interfaces: "{{ updated_interfaces }}"
+                    inputs: "{{ vm_spec.template.spec.domain.devices.inputs | default(omit) }}"
+                    networkInterfaceMultiqueue: "{{ vm_spec.template.spec.domain.devices.networkInterfaceMultiqueue | default(omit) }}"
+                    rng: "{{ vm_spec.template.spec.domain.devices.rng | default(omit) }}"
+                  cpu: "{{ vm_spec.template.spec.domain.cpu | default(omit) }}"
+                  firmware: "{{ vm_spec.template.spec.domain.firmware | default(omit) }}"
+                  machine: "{{ vm_spec.template.spec.domain.machine | default(omit) }}"
+                  resources: "{{ vm_spec.template.spec.domain.resources | default(omit) }}"
+                accessCredentials: "{{ vm_spec.template.spec.accessCredentials | default(omit) }}"
+                networks: "{{ updated_networks }}"
+                volumes: "{{ vm_spec.template.spec.volumes | default([]) }}"
+                terminationGracePeriodSeconds: "{{ vm_spec.template.spec.terminationGracePeriodSeconds | default(omit) }}"
+      register: vm_update_result
+
+    - name: Aguardar propagação
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Verificar VM atualizada
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ final_vm_name }}"
+        namespace: "{{ final_vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: final_vm_check
+
+    - name: Exibir resultado da operação
+      ansible.builtin.debug:
+        msg:
+          - "=== RESULTADO DA OPERACAO ==="
+          - "Network adapter adicionado com sucesso!"
+          - "VM: {{ final_vm_name }}"
+          - "Namespace: {{ final_vm_namespace }}"
+          - "Interface: {{ final_interface_name }}"
+          - "Network (NAD): {{ final_network_name }}"
+          - "Model: {{ final_network_model }}"
+          - "Type: {{ final_interface_type }}"
+          - ""
+          - "NOTA: Para que a nova interface seja reconhecida, a VM precisa ser reiniciada"
+
+    - name: Exibir interfaces da VM
+      ansible.builtin.debug:
+        msg:
+          - "=== INTERFACES ATUAIS DA VM ==="
+          - "Interfaces: {{ final_vm_check.resources[0].spec.template.spec.domain.devices.interfaces | map(attribute='name') | list | join(', ') }}"
+          - "Total: {{ final_vm_check.resources[0].spec.template.spec.domain.devices.interfaces | length }}"
+
+    - name: Exibir redes anexadas
+      ansible.builtin.debug:
+        msg:
+          - "=== REDES ANEXADAS ==="
+          - "{{ final_vm_check.resources[0].spec.template.spec.networks | map(attribute='name') | list | join(', ') }}"
+
+    - name: Exibir comandos úteis
+      ansible.builtin.debug:
+        msg:
+          - "=== COMANDOS UTEIS ==="
+          - "Ver VM:"
+          - "  oc get vm {{ final_vm_name }} -n {{ final_vm_namespace }}"
+          - ""
+          - "Ver interfaces da VM:"
+          - "  oc get vm {{ final_vm_name }} -n {{ final_vm_namespace }} -o jsonpath='{.spec.template.spec.domain.devices.interfaces[*].name}'"
+          - ""
+          - "Reiniciar VM:"
+          - "  virtctl restart {{ final_vm_name }} -n {{ final_vm_namespace }}"
+          - ""
+          - "Console da VM:"
+          - "  virtctl console {{ final_vm_name }} -n {{ final_vm_namespace }}"
+          - "  Dentro da VM: ip addr show"

@@ -1,0 +1,64 @@
+---
+- name: Criar VM no vSphere a partir de template
+  hosts: localhost
+  gather_facts: false
+  vars:
+    vcenter_hostname: vcsa.exemplo.local
+    vcenter_username: "{{ lookup('env','VCENTER_USER') }}"
+    vcenter_password: "{{ lookup('env','VCENTER_PASS') }}"
+    datacenter: DC-PRD
+    cluster: CL-Compute
+    datastore: DS-NVMe
+    folder: "/DC-PRD/vm/PROJETOS/AppX"
+    template: "rl9-cloudinit-template"
+    vm_name: "appx-prd-01"
+    vm_state: poweredon
+    cpu: 4
+    memory_mb: 8192
+    network_name: "VLAN-Prod-10.10.10.0/24"
+    ipv4: "10.10.10.50"
+    netmask: "255.255.255.0"
+    gateway: "10.10.10.1"
+    dns_servers:
+      - "10.10.10.10"
+      - "1.1.1.1"
+    domain: "corp.local"
+
+  tasks:
+    - name: Deploy de VM a partir do template com customização
+      community.vmware.vmware_guest:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: false
+        datacenter: "{{ datacenter }}"
+        cluster: "{{ cluster }}"
+        folder: "{{ folder }}"
+        name: "{{ vm_name }}"
+        template: "{{ template }}"
+        state: "{{ vm_state }}"
+        hardware:
+          memory_mb: "{{ memory_mb }}"
+          num_cpus: "{{ cpu }}"
+          scsi: paravirtual
+          hotadd_cpu: true
+          hotadd_memory: true
+        disk:
+          - size_gb: 60
+            type: thin
+            datastore: "{{ datastore }}"
+        networks:
+          - name: "{{ network_name }}"
+            type: static
+            ip: "{{ ipv4 }}"
+            netmask: "{{ netmask }}"
+            gateway: "{{ gateway }}"
+            dns_servers: "{{ dns_servers }}"
+        customization:
+          hostname: "{{ vm_name }}"
+          domain: "{{ domain }}"
+          dns_servers: "{{ dns_servers }}"
+        wait_for_ip_address: true
+        wait_for_customization: true
+        wait_for_customization_timeout: 900
+      register: vm_info

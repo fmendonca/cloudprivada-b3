@@ -1,0 +1,328 @@
+---
+- name: Ajustar vCPU e Memória de VM no OpenShift Virtualization
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    validate_certs: false
+    wait_for_completion: true
+    operation_timeout: 300
+
+  tasks:
+    - name: Obter timestamp atual
+      ansible.builtin.set_fact:
+        current_timestamp: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+
+    - name: Normalizar variável vm_project
+      ansible.builtin.set_fact:
+        vm_namespace: "{{ vm_project if vm_project is string else vm_project | first }}"
+
+    - name: Debug - Verificar variáveis recebidas
+      ansible.builtin.debug:
+        msg:
+          - "vm_name: {{ vm_name }}"
+          - "vm_project (original): {{ vm_project }}"
+          - "vm_namespace (normalizado): {{ vm_namespace }}"
+          - "adjust_cpu: {{ adjust_cpu | default(false) }}"
+          - "adjust_memory: {{ adjust_memory | default(false) }}"
+
+    - name: Validar variáveis obrigatórias
+      ansible.builtin.assert:
+        that:
+          - vm_name is defined
+          - vm_name | length > 0
+          - vm_namespace is defined
+          - vm_namespace | length > 0
+          - (adjust_cpu | default(false) | bool) or (adjust_memory | default(false) | bool)
+        fail_msg: "Variáveis obrigatórias não definidas ou nenhum recurso selecionado para ajuste"
+        success_msg: "Validação de variáveis concluída com sucesso"
+
+    - name: Validar configurações de CPU
+      ansible.builtin.assert:
+        that:
+          - new_cpu_cores is defined
+          - new_cpu_cores | int > 0
+          - new_cpu_cores | int <= 64
+        fail_msg: "Configuração de CPU inválida. Cores deve estar entre 1 e 64"
+      when: adjust_cpu | default(false) | bool
+
+    - name: Validar configurações de memória
+      ansible.builtin.assert:
+        that:
+          - new_memory is defined
+          - new_memory | length > 0
+        fail_msg: "Configuração de memória inválida"
+      when: adjust_memory | default(false) | bool
+
+    - name: Verificar se a VM existe
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: vm_check
+
+    - name: Falhar se VM não existe
+      ansible.builtin.fail:
+        msg: "VM '{{ vm_name }}' não encontrada no namespace '{{ vm_namespace }}'"
+      when: vm_check.resources | length == 0
+
+    - name: Obter configuração atual da VM
+      ansible.builtin.set_fact:
+        current_vm: "{{ vm_check.resources[0] }}"
+        vm_running: "{{ vm_check.resources[0].status.ready | default(false) }}"
+
+    - name: Extrair recursos atuais
+      ansible.builtin.set_fact:
+        current_cpu_cores: "{{ current_vm.spec.template.spec.domain.cpu.cores | default(1) }}"
+        current_cpu_sockets: "{{ current_vm.spec.template.spec.domain.cpu.sockets | default(1) }}"
+        current_cpu_threads: "{{ current_vm.spec.template.spec.domain.cpu.threads | default(1) }}"
+        current_memory: "{{ current_vm.spec.template.spec.domain.resources.requests.memory | default('1Gi') }}"
+        current_memory_limit: "{{ current_vm.spec.template.spec.domain.resources.limits.memory | default(current_vm.spec.template.spec.domain.resources.requests.memory | default('1Gi')) }}"
+
+    - name: Calcular total de vCPUs atuais
+      ansible.builtin.set_fact:
+        current_total_vcpus: "{{ (current_cpu_cores | int) * (current_cpu_sockets | int) * (current_cpu_threads | int) }}"
+
+    - name: Definir novas configurações de CPU
+      ansible.builtin.set_fact:
+        final_cpu_cores: "{{ new_cpu_cores | default(current_cpu_cores) }}"
+        final_cpu_sockets: "{{ new_cpu_sockets | default(current_cpu_sockets) }}"
+        final_cpu_threads: "{{ new_cpu_threads | default(current_cpu_threads) }}"
+      when: adjust_cpu | default(false) | bool
+
+    - name: Manter configurações atuais de CPU
+      ansible.builtin.set_fact:
+        final_cpu_cores: "{{ current_cpu_cores }}"
+        final_cpu_sockets: "{{ current_cpu_sockets }}"
+        final_cpu_threads: "{{ current_cpu_threads }}"
+      when: not (adjust_cpu | default(false) | bool)
+
+    - name: Definir nova configuração de memória
+      ansible.builtin.set_fact:
+        final_memory: "{{ new_memory | default(current_memory) }}"
+        final_memory_limit: "{{ new_memory_limit | default(new_memory | default(current_memory_limit)) }}"
+      when: adjust_memory | default(false) | bool
+
+    - name: Manter configuração atual de memória
+      ansible.builtin.set_fact:
+        final_memory: "{{ current_memory }}"
+        final_memory_limit: "{{ current_memory_limit }}"
+      when: not (adjust_memory | default(false) | bool)
+
+    - name: Calcular total de vCPUs finais
+      ansible.builtin.set_fact:
+        final_total_vcpus: "{{ (final_cpu_cores | int) * (final_cpu_sockets | int) * (final_cpu_threads | int) }}"
+
+    - name: Exibir comparação de recursos
+      ansible.builtin.debug:
+        msg:
+          - "=== COMPARAÇÃO DE RECURSOS ==="
+          - "VM: {{ vm_name }}"
+          - "Namespace: {{ vm_namespace }}"
+          - "Status: {{ 'Running' if vm_running else 'Stopped' }}"
+          - ""
+          - "=== CPU ==="
+          - "Atual: {{ current_total_vcpus }} vCPUs ({{ current_cpu_cores }}c/{{ current_cpu_sockets }}s/{{ current_cpu_threads }}t)"
+          - "Nova:  {{ final_total_vcpus }} vCPUs ({{ final_cpu_cores }}c/{{ final_cpu_sockets }}s/{{ final_cpu_threads }}t)"
+          - "Alteração: {{ 'Aumentar' if (final_total_vcpus | int) > (current_total_vcpus | int) else ('Diminuir' if (final_total_vcpus | int) < (current_total_vcpus | int) else 'Sem alteração') }}"
+          - ""
+          - "=== MEMÓRIA ==="
+          - "Atual: {{ current_memory }} (limite: {{ current_memory_limit }})"
+          - "Nova:  {{ final_memory }} (limite: {{ final_memory_limit }})"
+          - "Alteração: {{ 'Será alterada' if final_memory != current_memory else 'Sem alteração' }}"
+
+    - name: Avisar sobre VM em execução
+      ansible.builtin.debug:
+        msg: 
+          - "ATENÇÃO: VM está em execução."
+          - "- Aumento de recursos: Aplicado imediatamente (hot-add)"
+          - "- Diminuição de recursos: Requer reinicialização da VM"
+      when: vm_running
+
+    - name: Verificar se há diminuição de recursos com VM rodando
+      ansible.builtin.set_fact:
+        cpu_decrease: "{{ (final_total_vcpus | int) < (current_total_vcpus | int) }}"
+        memory_decrease: "{{ final_memory != current_memory and (final_memory | regex_replace('[^0-9]', '') | int) < (current_memory | regex_replace('[^0-9]', '') | int) }}"
+
+    - name: Avisar sobre necessidade de reinicialização
+      ansible.builtin.debug:
+        msg:
+          - "AVISO: Diminuição de recursos detectada!"
+          - "CPU: {{ 'Sim' if cpu_decrease else 'Não' }}"
+          - "Memória: {{ 'Sim' if memory_decrease else 'Não' }}"
+          - "A VM precisará ser reinicializada para aplicar a diminuição."
+      when: vm_running and (cpu_decrease or memory_decrease)
+
+    - name: Parar VM se necessário para diminuição de recursos
+      kubernetes.core.k8s:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ vm_namespace }}"
+        name: "{{ vm_name }}"
+        definition:
+          spec:
+            running: false
+        validate_certs: "{{ validate_certs }}"
+        merge_type: merge
+      when: 
+        - vm_running
+        - (cpu_decrease or memory_decrease)
+        - auto_restart | default(false) | bool
+
+    - name: Aguardar VM parar
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: vmi_check
+      until: vmi_check.resources | length == 0
+      retries: 30
+      delay: 10
+      when: 
+        - vm_running
+        - (cpu_decrease or memory_decrease)
+        - auto_restart | default(false) | bool
+
+    - name: Aplicar novas configurações de recursos
+      kubernetes.core.k8s:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ vm_namespace }}"
+        name: "{{ vm_name }}"
+        definition:
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: "{{ vm_name }}"
+            namespace: "{{ vm_namespace }}"
+            labels: "{{ current_vm.metadata.labels | default({}) }}"
+            annotations: "{{ current_vm.metadata.annotations | default({}) | combine({
+              'last-resource-update': current_timestamp,
+              'previous-cpu': current_total_vcpus | string,
+              'previous-memory': current_memory,
+              'updated-by': 'ansible-automation'
+            }) }}"
+          spec:
+            running: "{{ current_vm.spec.running | default(false) }}"
+            template:
+              metadata:
+                labels: "{{ current_vm.spec.template.metadata.labels | default({}) }}"
+              spec:
+                domain:
+                  cpu:
+                    cores: "{{ final_cpu_cores | int }}"
+                    sockets: "{{ final_cpu_sockets | int }}"
+                    threads: "{{ final_cpu_threads | int }}"
+                  resources:
+                    requests:
+                      memory: "{{ final_memory }}"
+                    limits:
+                      memory: "{{ final_memory_limit }}"
+                  devices: "{{ current_vm.spec.template.spec.domain.devices | default({}) }}"
+                  machine: "{{ current_vm.spec.template.spec.domain.machine | default(omit) }}"
+                networks: "{{ current_vm.spec.template.spec.networks | default([]) }}"
+                volumes: "{{ current_vm.spec.template.spec.volumes | default([]) }}"
+                terminationGracePeriodSeconds: "{{ current_vm.spec.template.spec.terminationGracePeriodSeconds | default(omit) }}"
+        validate_certs: "{{ validate_certs }}"
+        merge_type: merge
+      register: vm_update_result
+
+    - name: Reiniciar VM se foi parada automaticamente
+      kubernetes.core.k8s:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        namespace: "{{ vm_namespace }}"
+        name: "{{ vm_name }}"
+        definition:
+          spec:
+            running: true
+        validate_certs: "{{ validate_certs }}"
+        merge_type: merge
+      when: 
+        - vm_running
+        - (cpu_decrease or memory_decrease)
+        - auto_restart | default(false) | bool
+
+    - name: Aguardar VM inicializar
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+        wait_condition:
+          type: Ready
+          status: "True"
+        wait_timeout: "{{ operation_timeout }}"
+      when: 
+        - vm_running
+        - (cpu_decrease or memory_decrease)
+        - auto_restart | default(false) | bool
+
+    - name: Verificar configuração final
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: final_vm
+
+    - name: Extrair recursos finais
+      ansible.builtin.set_fact:
+        applied_cpu_cores: "{{ final_vm.resources[0].spec.template.spec.domain.cpu.cores | default(1) }}"
+        applied_cpu_sockets: "{{ final_vm.resources[0].spec.template.spec.domain.cpu.sockets | default(1) }}"
+        applied_cpu_threads: "{{ final_vm.resources[0].spec.template.spec.domain.cpu.threads | default(1) }}"
+        applied_memory: "{{ final_vm.resources[0].spec.template.spec.domain.resources.requests.memory | default('1Gi') }}"
+        applied_memory_limit: "{{ final_vm.resources[0].spec.template.spec.domain.resources.limits.memory | default('1Gi') }}"
+
+    - name: Calcular total de vCPUs aplicadas
+      ansible.builtin.set_fact:
+        applied_total_vcpus: "{{ (applied_cpu_cores | int) * (applied_cpu_sockets | int) * (applied_cpu_threads | int) }}"
+
+    - name: Exibir resultado da operação
+      ansible.builtin.debug:
+        msg:
+          - "=== RESULTADO DA OPERAÇÃO ==="
+          - "Recursos ajustados com sucesso!"
+          - "VM: {{ vm_name }}"
+          - "Namespace: {{ vm_namespace }}"
+          - ""
+          - "=== RECURSOS APLICADOS ==="
+          - "CPU: {{ applied_total_vcpus }} vCPUs ({{ applied_cpu_cores }}c/{{ applied_cpu_sockets }}s/{{ applied_cpu_threads }}t)"
+          - "Memória: {{ applied_memory }} (limite: {{ applied_memory_limit }})"
+          - ""
+          - "=== ALTERAÇÕES ==="
+          - "CPU: {{ current_total_vcpus }} → {{ applied_total_vcpus }} vCPUs"
+          - "Memória: {{ current_memory }} → {{ applied_memory }}"
+
+    - name: Exibir comandos úteis
+      ansible.builtin.debug:
+        msg:
+          - "=== COMANDOS ÚTEIS ==="
+          - "Verificar VM:"
+          - "  oc get vm {{ vm_name }} -n {{ vm_namespace }}"
+          - ""
+          - "Ver detalhes dos recursos:"
+          - "  oc describe vm {{ vm_name }} -n {{ vm_namespace }}"
+          - ""
+          - "Conectar na VM para verificar recursos:"
+          - "  virtctl console {{ vm_name }} -n {{ vm_namespace }}"
+          - "  # Dentro da VM:"
+          - "  # CPU: nproc ou lscpu"
+          - "  # Memória: free -h ou cat /proc/meminfo"
+
+    - name: Exibir avisos finais
+      ansible.builtin.debug:
+        msg:
+          - "=== AVISOS IMPORTANTES ==="
+          - "1. Se a VM estava rodando e houve diminuição de recursos,"
+          - "   verifique se ela foi reinicializada corretamente."
+          - "2. Alguns sistemas operacionais podem precisar de configuração"
+          - "   adicional para reconhecer novos recursos."
+          - "3. Para hot-add de CPU/memória, verifique se o SO guest suporta."

@@ -1,0 +1,247 @@
+---
+- name: Listar NetworkAttachmentDefinitions Disponíveis
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    validate_certs: false
+
+  tasks:
+    - name: Converter variável vm_namespace se vier como lista
+      ansible.builtin.set_fact:
+        target_namespace: "{{ vm_namespace | first if vm_namespace is defined and vm_namespace is iterable and vm_namespace is not string else vm_namespace | default('') }}"
+      when: vm_namespace is defined
+
+    - name: Definir namespace como vazio se não definido
+      ansible.builtin.set_fact:
+        target_namespace: ""
+      when: vm_namespace is not defined
+
+    - name: Listar todos os NADs (todos os namespaces)
+      kubernetes.core.k8s_info:
+        api_version: k8s.cni.cncf.io/v1
+        kind: NetworkAttachmentDefinition
+        validate_certs: "{{ validate_certs }}"
+      register: all_nads
+      when: target_namespace | length == 0
+
+    - name: Listar NADs em namespace específico
+      kubernetes.core.k8s_info:
+        api_version: k8s.cni.cncf.io/v1
+        kind: NetworkAttachmentDefinition
+        namespace: "{{ target_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: namespace_nads
+      when: target_namespace | length > 0
+
+    - name: Definir lista de NADs
+      ansible.builtin.set_fact:
+        nads_list: "{{ namespace_nads.resources if (target_namespace | length > 0) else all_nads.resources }}"
+
+    - name: Verificar se existem NADs
+      ansible.builtin.debug:
+        msg: "Nenhum NetworkAttachmentDefinition encontrado{{ ' no namespace ' + target_namespace if target_namespace | length > 0 else ' (buscando em todos os namespaces)' }}"
+      when: nads_list | length == 0
+
+    - name: Processar informações dos NADs
+      ansible.builtin.set_fact:
+        nads_info: "{{ nads_info | default([]) + [item_info] }}"
+      vars:
+        config_json: "{{ item.spec.config | from_json }}"
+        item_info:
+          name: "{{ item.metadata.name }}"
+          namespace: "{{ item.metadata.namespace }}"
+          full_name: "{{ item.metadata.name }}@{{ item.metadata.namespace }}"
+          type: "{{ config_json.type | default('unknown') }}"
+          bridge: "{{ config_json.bridge | default('N/A') }}"
+          vlan: "{{ config_json.vlan | default('N/A') }}"
+          ipam: "{{ config_json.ipam.type | default('N/A') if config_json.ipam is defined else 'N/A' }}"
+          created: "{{ item.metadata.creationTimestamp }}"
+          network_id: "{{ item.metadata.annotations['k8s.ovn.org/network-id'] | default('N/A') }}"
+          network_name: "{{ item.metadata.annotations['k8s.ovn.org/network-name'] | default('N/A') }}"
+      loop: "{{ nads_list }}"
+      when: nads_list | length > 0
+
+    - name: Agrupar NADs por namespace
+      ansible.builtin.set_fact:
+        nads_by_namespace: "{{ nads_info | default([]) | groupby('namespace') | list }}"
+      when: nads_list | length > 0
+
+    - name: Criar lista de NADs únicos (nome + namespace)
+      ansible.builtin.set_fact:
+        unique_nads: "{{ nads_info | default([]) | map(attribute='full_name') | unique | list }}"
+      when: nads_list | length > 0
+
+    - name: Exibir cabeçalho do resumo
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "  NETWORKATTACHMENTDEFINITIONS (NADs)    "
+          - "=========================================="
+          - "Total de NADs encontrados: {{ nads_list | length }}"
+          - "{{ 'Namespace filtrado: ' + target_namespace if target_namespace | length > 0 else 'Buscando em todos os namespaces' }}"
+          - "Namespaces unicos: {{ nads_by_namespace | length }}"
+          - "=========================================="
+      when: nads_list | length > 0
+
+    - name: Exibir NADs agrupados por namespace (primeiros 10)
+      ansible.builtin.debug:
+        msg: |
+          
+          +----------------------------------------------------------------------+
+          | Namespace: {{ '%-58s' | format(item.0) }} |
+          +----------------------------------------------------------------------+
+          {{ '| %-35s | %-30s |' | format('Nome NAD', 'Network Name') }}
+          +----------------------------------------------------------------------+
+          {% for nad in item.1 %}
+          {{ '| %-35s | %-30s |' | format(nad.name, nad.network_name[:30]) }}
+          {% endfor %}
+          +----------------------------------------------------------------------+
+      loop: "{{ nads_by_namespace[:10] }}"
+      when: nads_list | length > 0
+
+    - name: Aviso sobre limite de exibição
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "AVISO: Mostrando apenas os primeiros 10 namespaces de {{ nads_by_namespace | length }}"
+          - "       Para ver todos, use: oc get network-attachment-definitions -A"
+      when: 
+        - nads_list | length > 0
+        - nads_by_namespace | length > 10
+
+    - name: Criar resumo consolidado
+      ansible.builtin.set_fact:
+        nads_summary: |
+          
+          +----------------------------------------------------------------------+
+          |                         RESUMO CONSOLIDADO                           |
+          +----------------------------------------------------------------------+
+          | Total de NADs: {{ '%-54s' | format(nads_list | length) }} |
+          | Namespaces unicos: {{ '%-50s' | format(nads_by_namespace | length) }} |
+          | NADs unicos (nome+ns): {{ '%-44s' | format(unique_nads | length) }} |
+          +----------------------------------------------------------------------+
+          
+          NADs mais comuns:
+          {% set nad_names = nads_info | map(attribute='name') | list %}
+          {% for name in nad_names | unique %}
+          - {{ name }}: {{ nad_names | select('equalto', name) | list | length }} ocorrencia(s)
+          {% endfor %}
+      when: nads_list | length > 0
+
+    - name: Exibir resumo consolidado
+      ansible.builtin.debug:
+        msg: "{{ nads_summary }}"
+      when: nads_list | length > 0
+
+    - name: Salvar lista de NADs em variável para uso
+      ansible.builtin.set_fact:
+        available_networks: "{{ unique_nads | default([]) }}"
+        available_network_names: "{{ nads_info | default([]) | map(attribute='name') | unique | list }}"
+      when: nads_list | length > 0
+
+    - name: Preparar exemplos de uso
+      ansible.builtin.set_fact:
+        usage_examples: |
+          
+          +----------------------------------------------------------------------+
+          |              COMO USAR NO PLAYBOOK ADD_NETWORK_ADAPTER              |
+          +----------------------------------------------------------------------+
+          | Para adicionar uma rede, use o formato: NAD@NAMESPACE               |
+          +----------------------------------------------------------------------+
+          
+          Exemplos praticos (primeiros 5):
+          {% for nad in unique_nads[:5] %}
+          
+          {{ loop.index }}. ansible-playbook add_network_adapter_ocp.yml \
+               -e vm_name='sua-vm' \
+               -e vm_namespace='{{ nad.split('@')[1] }}' \
+               -e network_name='{{ nad.split('@')[0] }}'
+          {% endfor %}
+      when: nads_list | length > 0
+
+    - name: Exibir lista formatada para uso no playbook
+      ansible.builtin.debug:
+        msg: "{{ usage_examples }}"
+      when: nads_list | length > 0
+
+    - name: Exibir comandos úteis
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "+----------------------------------------------------------------------+"
+          - "|                         COMANDOS UTEIS                               |"
+          - "+----------------------------------------------------------------------+"
+          - ""
+          - "Listar todos os NADs:"
+          - "   oc get network-attachment-definitions -A"
+          - ""
+          - "Ver detalhes de um NAD especifico:"
+          - "   oc describe network-attachment-definition <nad-name> -n <namespace>"
+          - ""
+          - "Ver configuracao JSON:"
+          - "   oc get network-attachment-definition <nad-name> -n <namespace> -o yaml"
+          - ""
+          - "Filtrar por namespace especifico:"
+          - "   Reexecute este playbook com: -e vm_namespace='<namespace>'"
+          - ""
+          - "Salvar saida em arquivo:"
+          - "   Reexecute este playbook com: -e save_output=true"
+
+    - name: Criar arquivo de saída com lista de NADs
+      ansible.builtin.copy:
+        content: |
+          # NetworkAttachmentDefinitions Disponiveis
+          Gerado em: {{ lookup('pipe', 'date -u "+%Y-%m-%d %H:%M:%S UTC"') }}
+          Usuario: {{ lookup('env', 'USER') | default('N/A') }}
+          Total de NADs: {{ nads_list | length }}
+          
+          ## Resumo
+          - Total de NADs: {{ nads_list | length }}
+          - Namespaces unicos: {{ nads_by_namespace | length }}
+          - NADs unicos (nome+namespace): {{ unique_nads | length }}
+          
+          ## Lista de NADs por Namespace
+          
+          {% for ns, nad_list in nads_by_namespace %}
+          ### Namespace: `{{ ns }}`
+          
+          | Nome | Network Name | Tipo | VLAN |
+          |------|--------------|------|------|
+          {% for nad in nad_list %}
+          | {{ nad.name }} | {{ nad.network_name }} | {{ nad.type }} | {{ nad.vlan }} |
+          {% endfor %}
+          
+          {% endfor %}
+          
+          ## Lista Completa (Nome@Namespace)
+          
+          ```
+          {% for nad in unique_nads %}
+          {{ nad }}
+          {% endfor %}
+          ```
+          
+          ## Como usar no Ansible
+          
+          ```bash
+          ansible-playbook add_network_adapter_ocp.yml \
+            -e vm_name='<nome-da-vm>' \
+            -e vm_namespace='<namespace-da-vm>' \
+            -e network_name='<nome-do-nad>'
+          ```
+        dest: "/tmp/available_networks_{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}.md"
+      when: 
+        - nads_list | length > 0
+        - save_output | default(false) | bool
+      delegate_to: localhost
+
+    - name: Informar sobre arquivo salvo
+      ansible.builtin.debug:
+        msg:
+          - "Arquivo salvo com sucesso!"
+          - "Localizacao: /tmp/available_networks_*.md"
+      when: 
+        - nads_list | length > 0
+        - save_output | default(false) | bool

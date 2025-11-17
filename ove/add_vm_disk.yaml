@@ -1,0 +1,272 @@
+---
+- name: Adicionar Disco em VM no OpenShift Virtualization
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    validate_certs: false
+
+  tasks:
+    - name: Validar variáveis obrigatórias
+      ansible.builtin.assert:
+        that:
+          - vm_name is defined
+          - vm_namespace is defined
+          - disk_name is defined
+          - disk_size is defined
+        fail_msg: "Variáveis obrigatórias não definidas: vm_name, vm_namespace, disk_name, disk_size"
+        success_msg: "Validação de variáveis concluída com sucesso"
+
+    - name: Converter variáveis para string se vierem como lista
+      ansible.builtin.set_fact:
+        vm_name_str: "{{ vm_name | first if vm_name is iterable and vm_name is not string else vm_name }}"
+        vm_namespace_str: "{{ vm_namespace | first if vm_namespace is iterable and vm_namespace is not string else vm_namespace }}"
+        disk_name_str: "{{ disk_name | first if disk_name is iterable and disk_name is not string else disk_name }}"
+        disk_size_str: "{{ disk_size | first if disk_size is iterable and disk_size is not string else disk_size }}"
+        storage_class_str: "{{ storage_class | first if storage_class is defined and storage_class is iterable and storage_class is not string else storage_class | default('managed-csi') }}"
+        bus_type_str: "{{ bus_type | first if bus_type is defined and bus_type is iterable and bus_type is not string else bus_type | default('virtio') }}"
+        access_mode_str: "{{ access_mode | first if access_mode is defined and access_mode is iterable and access_mode is not string else access_mode | default('ReadWriteOnce') }}"
+        volume_mode_str: "{{ volume_mode | first if volume_mode is defined and volume_mode is iterable and volume_mode is not string else volume_mode | default('Block') }}"
+
+    - name: Normalizar tamanho do disco
+      ansible.builtin.set_fact:
+        normalized_disk_size: "{{ disk_size_str | string | trim | regex_replace(' ', '') }}"
+
+    - name: Validar formato do tamanho do disco
+      ansible.builtin.assert:
+        that:
+          - normalized_disk_size is regex('^[0-9]+[.]?[0-9]*(Gi|Mi|Ti|G|M|T|GiB|MiB|TiB)$', ignorecase=True)
+        fail_msg: |
+          Tamanho do disco inválido: '{{ disk_size_str }}'
+          Formatos aceitos: 10Gi, 50Gi, 100Gi, 1Ti
+        success_msg: "Formato do tamanho do disco validado: {{ normalized_disk_size }}"
+
+    - name: Converter para formato Kubernetes padrão
+      ansible.builtin.set_fact:
+        k8s_disk_size: >-
+          {%- if normalized_disk_size is regex('Gi$|Mi$|Ti$', ignorecase=True) -%}
+            {{ normalized_disk_size }}
+          {%- elif normalized_disk_size is regex('G$', ignorecase=True) -%}
+            {{ normalized_disk_size | regex_replace('G$', 'Gi', ignorecase=True) }}
+          {%- elif normalized_disk_size is regex('M$', ignorecase=True) -%}
+            {{ normalized_disk_size | regex_replace('M$', 'Mi', ignorecase=True) }}
+          {%- elif normalized_disk_size is regex('T$', ignorecase=True) -%}
+            {{ normalized_disk_size | regex_replace('T$', 'Ti', ignorecase=True) }}
+          {%- else -%}
+            {{ normalized_disk_size }}
+          {%- endif -%}
+
+    - name: Definir configurações finais
+      ansible.builtin.set_fact:
+        final_vm_name: "{{ vm_name_str }}"
+        final_vm_namespace: "{{ vm_namespace_str }}"
+        final_disk_name: "{{ disk_name_str }}"
+        final_disk_size: "{{ k8s_disk_size }}"
+        final_storage_class: "{{ storage_class_str }}"
+        final_access_mode: "{{ access_mode_str }}"
+        final_volume_mode: "{{ volume_mode_str }}"
+        final_bus_type: "{{ bus_type_str }}"
+        final_pvc_name: "{{ vm_name_str }}-{{ disk_name_str }}-pvc"
+
+    - name: Exibir configuração do disco
+      ansible.builtin.debug:
+        msg:
+          - "=== CONFIGURACAO DO DISCO ==="
+          - "VM: {{ final_vm_name }}"
+          - "Namespace: {{ final_vm_namespace }}"
+          - "Nome do Disco: {{ final_disk_name }}"
+          - "Tamanho: {{ final_disk_size }}"
+          - "Storage Class: {{ final_storage_class }}"
+          - "PVC: {{ final_pvc_name }}"
+          - "Bus Type: {{ final_bus_type }}"
+
+    - name: Obter configuração atual da VM
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ final_vm_name }}"
+        namespace: "{{ final_vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: vm_check
+
+    - name: Falhar se VM não existe
+      ansible.builtin.fail:
+        msg: "VM '{{ final_vm_name }}' não encontrada no namespace '{{ final_vm_namespace }}'"
+      when: vm_check.resources | length == 0
+
+    - name: Extrair configuração da VM
+      ansible.builtin.set_fact:
+        current_vm: "{{ vm_check.resources[0] }}"
+        current_disks: "{{ vm_check.resources[0].spec.template.spec.domain.devices.disks | default([]) }}"
+        current_volumes: "{{ vm_check.resources[0].spec.template.spec.volumes | default([]) }}"
+
+    - name: Verificar se disco já existe
+      ansible.builtin.set_fact:
+        disk_exists: "{{ current_disks | selectattr('name', 'equalto', final_disk_name) | list | length > 0 }}"
+
+    - name: Falhar se disco já existe
+      ansible.builtin.fail:
+        msg: "Disco '{{ final_disk_name }}' já existe na VM '{{ final_vm_name }}'"
+      when: disk_exists
+
+    - name: Verificar se PVC já existe
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        name: "{{ final_pvc_name }}"
+        namespace: "{{ final_vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: pvc_check
+
+    - name: Criar PVC para o novo disco
+      kubernetes.core.k8s:
+        state: present
+        validate_certs: "{{ validate_certs }}"
+        wait: false
+        definition:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: "{{ final_pvc_name }}"
+            namespace: "{{ final_vm_namespace }}"
+            labels:
+              app: "{{ final_vm_name }}"
+              disk-type: "data"
+          spec:
+            accessModes:
+              - "{{ final_access_mode }}"
+            volumeMode: "{{ final_volume_mode }}"
+            resources:
+              requests:
+                storage: "{{ final_disk_size }}"
+            storageClassName: "{{ final_storage_class }}"
+      when: pvc_check.resources | length == 0
+
+    - name: Aguardar criação do PVC
+      ansible.builtin.pause:
+        seconds: 5
+      when: pvc_check.resources | length == 0
+
+    - name: Preparar lista de discos atualizada
+      ansible.builtin.set_fact:
+        new_disk_entry:
+          name: "{{ final_disk_name }}"
+          disk:
+            bus: "{{ final_bus_type }}"
+
+    - name: Preparar lista de volumes atualizada
+      ansible.builtin.set_fact:
+        new_volume_entry:
+          name: "{{ final_disk_name }}"
+          persistentVolumeClaim:
+            claimName: "{{ final_pvc_name }}"
+
+    - name: Adicionar novo disco e volume às listas
+      ansible.builtin.set_fact:
+        updated_disks: "{{ current_disks + [new_disk_entry] }}"
+        updated_volumes: "{{ current_volumes + [new_volume_entry] }}"
+
+    - name: Extrair spec completo da VM preservando estrutura
+      ansible.builtin.set_fact:
+        vm_spec: "{{ current_vm.spec }}"
+
+    - name: Atualizar VM com novo disco (preservando runStrategy)
+      kubernetes.core.k8s:
+        state: present
+        validate_certs: "{{ validate_certs }}"
+        definition:
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: "{{ final_vm_name }}"
+            namespace: "{{ final_vm_namespace }}"
+            labels: "{{ current_vm.metadata.labels | default({}) }}"
+            annotations: "{{ current_vm.metadata.annotations | default({}) }}"
+          spec:
+            runStrategy: "{{ vm_spec.runStrategy | default(omit) }}"
+            running: "{{ omit }}"
+            instancetype: "{{ vm_spec.instancetype | default(omit) }}"
+            preference: "{{ vm_spec.preference | default(omit) }}"
+            dataVolumeTemplates: "{{ vm_spec.dataVolumeTemplates | default(omit) }}"
+            template:
+              metadata:
+                labels: "{{ vm_spec.template.metadata.labels | default({}) }}"
+                annotations: "{{ vm_spec.template.metadata.annotations | default(omit) }}"
+              spec:
+                domain:
+                  devices:
+                    disks: "{{ updated_disks }}"
+                    interfaces: "{{ vm_spec.template.spec.domain.devices.interfaces | default([]) }}"
+                    inputs: "{{ vm_spec.template.spec.domain.devices.inputs | default(omit) }}"
+                    networkInterfaceMultiqueue: "{{ vm_spec.template.spec.domain.devices.networkInterfaceMultiqueue | default(omit) }}"
+                    rng: "{{ vm_spec.template.spec.domain.devices.rng | default(omit) }}"
+                  cpu: "{{ vm_spec.template.spec.domain.cpu | default(omit) }}"
+                  firmware: "{{ vm_spec.template.spec.domain.firmware | default(omit) }}"
+                  machine: "{{ vm_spec.template.spec.domain.machine | default(omit) }}"
+                  resources: "{{ vm_spec.template.spec.domain.resources | default(omit) }}"
+                accessCredentials: "{{ vm_spec.template.spec.accessCredentials | default(omit) }}"
+                networks: "{{ vm_spec.template.spec.networks | default([]) }}"
+                volumes: "{{ updated_volumes }}"
+                terminationGracePeriodSeconds: "{{ vm_spec.template.spec.terminationGracePeriodSeconds | default(omit) }}"
+      register: vm_update_result
+
+    - name: Aguardar propagação
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Verificar VM atualizada
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ final_vm_name }}"
+        namespace: "{{ final_vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: final_vm_check
+
+    - name: Verificar status do PVC
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        name: "{{ final_pvc_name }}"
+        namespace: "{{ final_vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: final_pvc_status
+
+    - name: Exibir resultado da operação
+      ansible.builtin.debug:
+        msg:
+          - "=== RESULTADO DA OPERACAO ==="
+          - "Disco adicionado com sucesso!"
+          - "VM: {{ final_vm_name }}"
+          - "Namespace: {{ final_vm_namespace }}"
+          - "Disco: {{ final_disk_name }}"
+          - "PVC: {{ final_pvc_name }}"
+          - "Tamanho: {{ final_disk_size }}"
+          - "PVC Status: {{ final_pvc_status.resources[0].status.phase if final_pvc_status.resources | length > 0 else 'Unknown' }}"
+          - ""
+          - "NOTA: Se PVC estiver 'Pending', ele será provisionado quando a VM iniciar/reiniciar"
+
+    - name: Exibir discos da VM
+      ansible.builtin.debug:
+        msg:
+          - "=== DISCOS ATUAIS DA VM ==="
+          - "Discos: {{ final_vm_check.resources[0].spec.template.spec.domain.devices.disks | map(attribute='name') | list | join(', ') }}"
+          - "Total: {{ final_vm_check.resources[0].spec.template.spec.domain.devices.disks | length }}"
+
+    - name: Exibir comandos úteis
+      ansible.builtin.debug:
+        msg:
+          - "=== COMANDOS UTEIS ==="
+          - "Ver VM:"
+          - "  oc get vm {{ final_vm_name }} -n {{ final_vm_namespace }}"
+          - ""
+          - "Ver PVC:"
+          - "  oc get pvc {{ final_pvc_name }} -n {{ final_vm_namespace }}"
+          - ""
+          - "Iniciar VM (se parada):"
+          - "  virtctl start {{ final_vm_name }} -n {{ final_vm_namespace }}"
+          - ""
+          - "Console da VM:"
+          - "  virtctl console {{ final_vm_name }} -n {{ final_vm_namespace }}"
+          - "  Dentro da VM: lsblk"

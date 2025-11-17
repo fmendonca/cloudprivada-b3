@@ -2,11 +2,17 @@
   hosts: localhost
   gather_facts: false
   vars:
-    vlan_id: 224                
-    nad_name: "vlan224"     
-    nad_namespace: "default"    
-    logical_switch: "vmdata-network"
-    mtu: 1400
+    vlan_id: 224
+    nad_name: vlan224 
+    nad_namespace: default
+    logical_switch: >-
+      {{ 
+        (custom_logical_switch | default('')) 
+        if custom_logical_switch != '' 
+        else (logical_switch | first) 
+      }}
+    mtu: 1400       
+    interface_type: internal
 
   tasks:
     - name: Criar NAD com base em parâmetros

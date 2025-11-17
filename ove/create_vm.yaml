@@ -1,0 +1,690 @@
+---
+- name: Criar VM no OpenShift Virtualization
+  hosts: localhost
+  gather_facts: true
+  connection: local
+
+  vars:
+    vm_name: "{{ survey_vm_name | default('vm-default') }}"
+    vm_namespace: "{{ survey_vm_namespace | default('default') }}"
+    vm_storage: "{{ survey_vm_storage | default('30Gi') }}"
+    vm_network: "{{ survey_vm_network | default('default') }}"
+    selected_os: "{{ survey_so | default('rhel9') | lower }}"
+
+    datasource_mappings:
+      rhel8:
+        name: "rhel8"
+        namespace: "openshift-virtualization-os-images"
+        default_user: "cloud-user"
+        default_password: "redhat123"
+        min_storage: "30Gi"
+      rhel9:
+        name: "rhel9"
+        namespace: "openshift-virtualization-os-images"
+        default_user: "cloud-user"
+        default_password: "redhat123"
+        min_storage: "30Gi"
+      rhel10:
+        name: "rhel10"
+        namespace: "openshift-virtualization-os-images"
+        default_user: "cloud-user"
+        default_password: "redhat123"
+        min_storage: "30Gi"
+      win2k19:
+        name: "win2k19"
+        namespace: "openshift-virtualization-os-images"
+        default_user: "Administrator"
+        default_password: "Windows123!"
+        min_storage: "50Gi"
+      win2k22:
+        name: "win2k22"
+        namespace: "openshift-virtualization-os-images"
+        default_user: "Administrator"
+        default_password: "Windows123!"
+        min_storage: "50Gi"
+      win2k25:
+        name: "win2k25"
+        namespace: "openshift-virtualization-os-images"
+        default_user: "Administrator"
+        default_password: "Windows123!"
+        min_storage: "60Gi"
+
+    vm_datasource_name: "{{ datasource_mappings[selected_os].name | default('rhel9') }}"
+    vm_datasource_namespace: "{{ datasource_mappings[selected_os].namespace | default('openshift-virtualization-os-images') }}"
+    vm_user: "{{ survey_vm_user | default(datasource_mappings[selected_os].default_user | default('cloud-user')) }}"
+    vm_password: "{{ survey_vm_password | default(datasource_mappings[selected_os].default_password | default('redhat123')) }}"
+    vm_min_storage: "{{ datasource_mappings[selected_os].min_storage | default('30Gi') }}"
+    log_level: "{{ survey_log_level | default('info') }}"
+    wait_timeout: "{{ survey_wait_timeout | default(600) | int }}"
+    show_debug: "{{ log_level in ['debug'] }}"
+    show_info: "{{ log_level in ['info', 'debug'] }}"
+    show_detailed_events: "{{ log_level == 'debug' }}"
+    enable_monitoring: "{{ log_level in ['info', 'debug'] }}"
+    current_user: "{{ lookup('env', 'USER') | default(ansible_user_id) | default('unknown') }}"
+
+  tasks:
+    - name: "[DEBUG] Mostrar todas as variáveis recebidas do survey"
+      debug:
+        msg: |
+          ================================================================
+                      VARIAVEIS RECEBIDAS DO SURVEY
+          ================================================================
+          
+          VM Configuration:
+             Nome: {{ survey_vm_name | default('NAO_DEFINIDA') }}
+             Namespace: {{ survey_vm_namespace | default('NAO_DEFINIDA') }}
+             Sistema Operacional: {{ survey_so | default('NAO_DEFINIDA') }}
+          
+          Recursos:
+             Memoria: {{ survey_vm_memory_gib | default('NAO_DEFINIDA') }}
+             CPU Cores: {{ survey_vm_cores | default('NAO_DEFINIDA') }}
+             CPU Sockets: {{ survey_vm_sockets | default('NAO_DEFINIDA') }}
+             CPU Threads: {{ survey_vm_threads | default('NAO_DEFINIDA') }}
+             Storage: {{ survey_vm_storage | default('NAO_DEFINIDA') }}
+          
+          Network & Access:
+             Network: {{ survey_vm_network | default('NAO_DEFINIDA') }}
+             Usuario: {{ survey_vm_user | default('NAO_DEFINIDA') }}
+             Senha: {{ '***HIDDEN***' if survey_vm_password is defined else 'NAO_DEFINIDA' }}
+          
+          Options:
+             Log Level: {{ survey_log_level | default('NAO_DEFINIDA') }}
+             Auto Start: {{ survey_auto_start | default('NAO_DEFINIDA') }}
+          
+          Execution Info:
+             Executado por: {{ current_user }}
+             Data/Hora: {{ ansible_date_time.iso8601 | default('unknown') }}
+          
+          ================================================================
+      tags: always
+
+    - name: "[FIX] Processar variáveis do survey com tratamento específico"
+      set_fact:
+        raw_memory: "{{ survey_vm_memory_gib | default('2Gi') | string }}"
+        raw_auto_start: "{{ survey_auto_start | default('false') }}"
+        raw_cores: "{{ survey_vm_cores | default('2') }}"
+        raw_sockets: "{{ survey_vm_sockets | default('1') }}"
+        raw_threads: "{{ survey_vm_threads | default('1') }}"
+        raw_storage: "{{ survey_vm_storage | default('30Gi') }}"
+        raw_network: "{{ survey_vm_network | default('default') }}"
+        current_timestamp: "{{ ansible_date_time.iso8601 | default(ansible_date_time.epoch | default('unknown')) }}"
+      tags: always
+
+    - name: "[FIX] Normalizar - Passo 1: Extrair valores"
+      set_fact:
+        temp_memory: "{{ raw_memory | regex_replace('[^0-9]', '') }}"
+        temp_cores: "{{ raw_cores | string }}"
+        temp_sockets: "{{ raw_sockets | string }}"
+        temp_threads: "{{ raw_threads | string }}"
+        temp_storage: "{{ raw_storage | regex_replace('[^0-9]', '') }}"
+      tags: always
+
+    - name: "[FIX] Normalizar - Passo 2: Converter para INT"
+      set_fact:
+        normalized_memory_gib: "{{ temp_memory | default('2') | int }}"
+        normalized_cores: "{{ temp_cores | default('2') | int }}"
+        normalized_sockets: "{{ temp_sockets | default('1') | int }}"
+        normalized_threads: "{{ temp_threads | default('1') | int }}"
+        storage_numeric: "{{ temp_storage | default('30') | int }}"
+        normalized_storage: "{{ raw_storage if 'Gi' in raw_storage else (raw_storage + 'Gi') }}"
+        normalized_auto_start: "{{ (raw_auto_start | first | bool) if (raw_auto_start is iterable and raw_auto_start is not string) else (raw_auto_start | bool) }}"
+        normalized_network: "{{ raw_network }}"
+        min_storage_numeric: "{{ vm_min_storage | regex_replace('[^0-9]', '') | int }}"
+      tags: always
+
+    - name: "[DEBUG] Valores normalizados"
+      debug:
+        msg: |
+          ================================================================
+                        VALORES APOS NORMALIZACAO
+          ================================================================
+          
+          Memoria:
+             Raw: {{ raw_memory }}
+             Normalizado: {{ normalized_memory_gib }} GiB
+             Tipo: {{ normalized_memory_gib | type_debug }}
+          
+          CPU:
+             Cores: {{ normalized_cores }} ({{ normalized_cores | type_debug }})
+             Sockets: {{ normalized_sockets }} ({{ normalized_sockets | type_debug }})
+             Threads: {{ normalized_threads }} ({{ normalized_threads | type_debug }})
+             Total vCPUs: {{ normalized_cores | int * normalized_sockets | int * normalized_threads | int }}
+          
+          Storage:
+             Normalizado: {{ normalized_storage }}
+             Numerico: {{ storage_numeric }} GB ({{ storage_numeric | type_debug }})
+             Minimo requerido: {{ vm_min_storage }}
+          
+          Network:
+             Network: {{ normalized_network }}
+          
+          Startup:
+             Auto Start: {{ normalized_auto_start }} ({{ normalized_auto_start | type_debug }})
+             Run Strategy: {% if normalized_auto_start %}Always{% else %}RerunOnFailure{% endif %}
+
+          
+          Timestamp: {{ current_timestamp }}
+          
+          ================================================================
+      tags: always
+
+    - name: "[VALIDATION] Validar variáveis obrigatórias"
+      fail:
+        msg: |
+          ================================================================
+                           ERRO DE VALIDACAO
+          ================================================================
+          
+          ERRO: Variáveis obrigatórias não foram definidas
+          
+          Verifique se o survey está configurado corretamente:
+          
+          Variáveis necessárias:
+             survey_vm_name: {{ survey_vm_name | default('[X] NAO DEFINIDA') }}
+             survey_vm_namespace: {{ survey_vm_namespace | default('[X] NAO DEFINIDA') }}
+             survey_so: {{ survey_so | default('[X] NAO DEFINIDA') }}
+          
+          Acao necessaria: Configure o survey no Ansible Automation Platform
+          
+          ================================================================
+      when: >
+        survey_vm_name is not defined or
+        survey_vm_namespace is not defined or
+        survey_so is not defined
+      tags: validation
+
+    - name: "[VALIDATION] Validar SO selecionado e DataSource"
+      fail:
+        msg: |
+          ================================================================
+                      ERRO: SISTEMA OPERACIONAL INVALIDO
+          ================================================================
+          
+          ERRO: Sistema Operacional '{{ selected_os | upper }}' não está mapeado
+          
+          SOs disponiveis:
+          {% for os in datasource_mappings.keys() | list %}
+             [+] {{ os | upper }}
+          {% endfor %}
+          
+          Verifique:
+             [+] Se o SO selecionado está correto
+             [+] Se existe mapeamento no playbook para este SO
+          
+          ================================================================
+      when: vm_datasource_name == '' or vm_datasource_namespace == ''
+      tags: validation
+
+    - name: "[INFO] Iniciando processo de criação da VM"
+      debug:
+        msg: |
+          ================================================================
+                       INICIANDO CRIACAO DA VM
+          ================================================================
+          
+          VM Information:
+             Nome: {{ vm_name }}
+             Namespace: {{ vm_namespace }}
+             SO: {{ selected_os | upper }}
+             DataSource: {{ vm_datasource_name }} ({{ vm_datasource_namespace }})
+             Usuario: {{ vm_user }}
+          
+          Recursos Alocados:
+             CPU: {{ normalized_cores }}c / {{ normalized_sockets }}s / {{ normalized_threads }}t = {{ normalized_cores | int * normalized_sockets | int * normalized_threads | int }} vCPUs
+             Memoria: {{ normalized_memory_gib }} GiB
+             Storage: {{ normalized_storage }} ({{ storage_numeric }} GB)
+             Network: {{ normalized_network }}
+          
+          Configuracoes:
+             Log Level: {{ log_level | upper }}
+             Timeout: {{ wait_timeout }}s
+             Auto Start: {{ normalized_auto_start }}
+             Run Strategy: {% if normalized_auto_start %}Always{% else %}RerunOnFailure{% endif %}
+
+          
+          Execution Info:
+             Executado por: {{ current_user }}
+             Timestamp: {{ current_timestamp }}
+          
+          ================================================================
+      when: show_info
+      tags: always
+
+    - name: "[VALIDATION] Verificar conectividade do cluster"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+      register: cluster_check
+      failed_when: false
+      tags: validation
+
+    - name: "[ERROR] Falhar se cluster não estiver acessível"
+      fail:
+        msg: |
+          ================================================================
+                        ERRO: CLUSTER NAO ACESSIVEL
+          ================================================================
+          
+          ERRO: Não foi possível conectar ao cluster OpenShift/Kubernetes
+          
+          Verifique:
+             [+] Conectividade de rede com o cluster
+             [+] Configuração do kubeconfig
+             [+] Permissões de acesso do usuário
+             [+] Status do cluster OpenShift
+          
+          Comandos uteis:
+             oc whoami
+             oc cluster-info
+             oc get nodes
+          
+          ================================================================
+      when: cluster_check.failed
+      tags: validation
+
+    - name: "[INFO] Cluster acessível - Continuando"
+      debug:
+        msg: |
+          [OK] Cluster conectado com sucesso
+               Nodes disponiveis: {{ cluster_check.resources | length }}
+      when: show_info and not cluster_check.failed
+      tags: validation
+
+    - name: "[VALIDATION] Verificar se namespace existe"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: "{{ vm_namespace }}"
+      register: namespace_check
+      failed_when: false
+      tags: namespace
+
+    - name: "[INFO] Criando namespace"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ vm_namespace }}"
+            labels:
+              name: "{{ vm_namespace }}"
+              created-by: ansible-platform
+              purpose: vm-hosting
+              redhat.com/managed: "true"
+              redhat.com/created-by-user: "{{ current_user }}"
+      when: namespace_check.resources | length == 0
+      register: namespace_creation
+      tags: namespace
+
+    - name: "[INFO] Status do namespace"
+      debug:
+        msg: |
+          {% if namespace_check.resources | length > 0 %}
+          [OK] Namespace '{{ vm_namespace }}' ja existe
+          {% else %}
+          [OK] Namespace '{{ vm_namespace }}' criado com sucesso
+          {% endif %}
+      when: show_info
+      tags: namespace
+
+    - name: "[VALIDATION] Verificar DataSource"
+      kubernetes.core.k8s_info:
+        api_version: cdi.kubevirt.io/v1beta1
+        kind: DataSource
+        name: "{{ vm_datasource_name }}"
+        namespace: "{{ vm_datasource_namespace }}"
+      register: datasource_check
+      failed_when: false
+      tags: validation
+
+    - name: "[ERROR] DataSource não encontrado"
+      fail:
+        msg: |
+          ================================================================
+                        ERRO: DATASOURCE NAO ENCONTRADO
+          ================================================================
+          
+          ERRO: DataSource '{{ vm_datasource_name }}' não encontrado
+          
+          Localizacao esperada:
+             Namespace: {{ vm_datasource_namespace }}
+          
+          Verifique:
+             [+] Se o nome está correto
+             [+] Se o namespace está correto
+             [+] Se as imagens estão disponíveis no cluster
+          
+          Listar DataSources disponiveis:
+             oc get datasource -n {{ vm_datasource_namespace }}
+          
+          ================================================================
+      when: datasource_check.resources | length == 0
+      tags: validation
+
+    - name: "[DEBUG] Informações do DataSource"
+      debug:
+        msg: |
+          [OK] DataSource encontrado
+               Nome: {{ vm_datasource_name }}
+               Namespace: {{ vm_datasource_namespace }}
+               Status: {{ datasource_check.resources[0].status | default('N/A') }}
+      when: show_debug and datasource_check.resources | length > 0
+      tags: validation
+
+    - name: "[VALIDATION] Verificar se VM já existe"
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+      register: vm_exists
+      failed_when: false
+      tags: validation
+
+    - name: "[INFO] VM já existe - será atualizada"
+      debug:
+        msg: |
+          [!] VM '{{ vm_name }}' ja existe
+              Status atual: {{ vm_exists.resources[0].status.printableStatus | default('Unknown') }}
+              A VM sera atualizada com as novas configuracoes
+      when: show_info and vm_exists.resources | length > 0
+      tags: validation
+
+    - name: "[FIX] Calcular diferença de storage"
+      set_fact:
+        storage_diff: "{{ (min_storage_numeric | int) - (storage_numeric | int) }}"
+      tags: validation
+
+    - name: "[VALIDATION] Validar storage mínimo para o SO selecionado"
+      fail:
+        msg: |
+          ================================================================
+                          ERRO: STORAGE INSUFICIENTE
+          ================================================================
+          
+          ERRO: O storage solicitado e menor que o necessario para {{ selected_os | upper }}
+          
+          Storage:
+             Solicitado: {{ normalized_storage }} ({{ storage_numeric }} GB)
+             Minimo necessario: {{ vm_min_storage }} ({{ min_storage_numeric }} GB)
+             Diferenca: {{ storage_diff }} GB a menos
+          
+          Acao necessaria:
+             Atualize o valor de storage para pelo menos {{ vm_min_storage }}
+          
+          No survey do AAP:
+             survey_vm_storage = {{ vm_min_storage }}
+          
+          ================================================================
+      when: (storage_numeric | int) < (min_storage_numeric | int)
+      tags: validation
+
+    - name: "[VALIDATION] Validar recursos mínimos"
+      fail:
+        msg: |
+          ================================================================
+                        ERRO: RECURSOS INSUFICIENTES
+          ================================================================
+          
+          ERRO: Os recursos solicitados estao abaixo do minimo requerido
+          
+          Requisitos minimos vs Solicitado:
+             CPU: >= 1 core (atual: {{ normalized_cores }}) {% if (normalized_cores | int) >= 1 %}[OK]{% else %}[ERRO]{% endif %}
+
+             Memoria: >= 1 GiB (atual: {{ normalized_memory_gib }}) {% if (normalized_memory_gib | int) >= 1 %}[OK]{% else %}[ERRO]{% endif %}
+
+          
+          Acao necessaria:
+             Aumente os recursos para atender os requisitos minimos
+          
+          ================================================================
+      when: >
+        (normalized_cores | int) < 1 or
+        (normalized_memory_gib | int) < 1
+      tags: validation
+
+    - name: "[INFO] Recursos validados com sucesso"
+      debug:
+        msg: |
+          ================================================================
+                     VALIDACAO DE RECURSOS - SUCESSO
+          ================================================================
+          
+          [OK] CPU: {{ normalized_cores }} cores
+          [OK] Memoria: {{ normalized_memory_gib }} GiB
+          [OK] Storage: {{ normalized_storage }} ({{ storage_numeric }} GB)
+          
+          Prosseguindo com a criacao da VM...
+          
+          ================================================================
+      when: show_info
+      tags: validation
+
+    - name: "[DEPLOY] Criar arquivo temporário com YAML da VM"
+      copy:
+        content: |
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: {{ vm_name }}
+            namespace: {{ vm_namespace }}
+            labels:
+              app: {{ vm_name }}
+              created-by: ansible-platform
+              created-by-user: {{ current_user }}
+              log-level: {{ log_level }}
+              redhat.com/managed: "true"
+              redhat.com/product: openshift-virtualization
+            annotations:
+              redhat.com/created-by: "Red Hat Ansible Platform"
+              redhat.com/created-by-user: "{{ current_user }}"
+              redhat.com/created-at: "{{ current_timestamp }}"
+          spec:
+            runStrategy: {% if normalized_auto_start %}Always{% else %}RerunOnFailure{% endif %}
+
+            dataVolumeTemplates:
+              - apiVersion: cdi.kubevirt.io/v1beta1
+                kind: DataVolume
+                metadata:
+                  name: {{ vm_name }}
+                  labels:
+                    redhat.com/managed: "true"
+                spec:
+                  sourceRef:
+                    kind: DataSource
+                    name: {{ vm_datasource_name }}
+                    namespace: {{ vm_datasource_namespace }}
+                  storage:
+                    resources:
+                      requests:
+                        storage: {{ normalized_storage }}
+            template:
+              metadata:
+                labels:
+                  kubevirt.io/domain: {{ vm_name }}
+                  app: {{ vm_name }}
+                  redhat.com/managed: "true"
+              spec:
+                domain:
+                  cpu:
+                    cores: {{ normalized_cores }}
+                    sockets: {{ normalized_sockets }}
+                    threads: {{ normalized_threads }}
+                  memory:
+                    guest: {{ normalized_memory_gib }}Gi
+                  devices:
+                    disks:
+                      - name: rootdisk
+                        disk:
+                          bus: virtio
+                      - name: cloudinitdisk
+                        disk:
+                          bus: virtio
+                    interfaces:
+                      - name: default
+                        masquerade: {}
+                networks:
+                  - name: default
+                    pod: {}
+                volumes:
+                  - name: rootdisk
+                    dataVolume:
+                      name: {{ vm_name }}
+                  - name: cloudinitdisk
+                    cloudInitNoCloud:
+                      userData: |
+                        #cloud-config
+                        user: {{ vm_user }}
+                        password: {{ vm_password }}
+                        chpasswd: { expire: False }
+                        ssh_pwauth: True
+                        disable_root: false
+                        packages:
+                          - qemu-guest-agent
+                        runcmd:
+                          - systemctl enable qemu-guest-agent
+                          - systemctl start qemu-guest-agent
+        dest: "/tmp/vm-{{ vm_name }}.yaml"
+      tags: deploy
+
+    - name: "[DEPLOY] Ler YAML da VM"
+      slurp:
+        src: "/tmp/vm-{{ vm_name }}.yaml"
+      register: vm_yaml_content
+      tags: deploy
+
+    - name: "[DEPLOY] Aplicar VM usando k8s module com YAML lido"
+      kubernetes.core.k8s:
+        state: present
+        resource_definition: "{{ vm_yaml_content.content | b64decode | from_yaml }}"
+      register: vm_creation
+      tags: deploy
+
+    - name: "[CLEANUP] Remover arquivo temporário"
+      file:
+        path: "/tmp/vm-{{ vm_name }}.yaml"
+        state: absent
+      tags: deploy
+
+    - name: "[DEBUG] Resultado da criação da VM"
+      debug:
+        var: vm_creation
+      when: show_debug
+      tags: deploy
+
+    - name: "[INFO] VM criada com sucesso"
+      debug:
+        msg: |
+          ================================================================
+                      VM CRIADA/ATUALIZADA COM SUCESSO
+          ================================================================
+          
+          Informacoes da VM:
+             Nome: {{ vm_name }}
+             Namespace: {{ vm_namespace }}
+             SO: {{ selected_os | upper }}
+          
+          Recursos Configurados:
+             CPU: {{ normalized_cores }}c / {{ normalized_sockets }}s / {{ normalized_threads }}t
+             Memoria: {{ normalized_memory_gib }} GiB
+             Storage: {{ normalized_storage }}
+             Network: {{ normalized_network }}
+          
+          Status:
+             Auto Start: {{ normalized_auto_start }}
+             Run Strategy: {% if normalized_auto_start %}Always{% else %}RerunOnFailure{% endif %}
+
+          
+          Provisionamento:
+             [!] A VM esta em provisionamento (clonando imagem base)
+             [!] Tempo estimado: 3-5 minutos
+          
+          ================================================================
+                          COMANDOS DE MONITORAMENTO
+          ================================================================
+          
+          Verificar status:
+             oc get vm,vmi,dv -n {{ vm_namespace }}
+          
+          Ver detalhes da VM:
+             oc describe vm {{ vm_name }} -n {{ vm_namespace }}
+          
+          Ver progresso do DataVolume:
+             oc describe dv {{ vm_name }} -n {{ vm_namespace }}
+          
+          Ver eventos:
+             oc get events -n {{ vm_namespace }} --sort-by='.lastTimestamp' | tail -20
+          
+          Monitorar continuamente:
+             watch 'oc get vm,vmi,dv -n {{ vm_namespace }}'
+          
+          Acessar console da VM (quando estiver Running):
+             virtctl console {{ vm_name }} -n {{ vm_namespace }}
+          
+          Ver IP da VM (quando estiver Running):
+             oc get vmi {{ vm_name }} -n {{ vm_namespace }} -o jsonpath='{.status.interfaces[0].ipAddress}'
+          
+          ================================================================
+      when: vm_creation is succeeded
+      tags: deploy
+
+    - name: "[INFO] Resumo da execução"
+      debug:
+        msg: |
+          ================================================================
+                            RESUMO DA EXECUCAO
+          ================================================================
+          
+          Playbook: Red Hat OpenShift Virtualization VM Creation
+          
+          VM Details:
+             Nome: {{ vm_name }}
+             Namespace: {{ vm_namespace }}
+             SO: {{ selected_os | upper }}
+             DataSource: {{ vm_datasource_name }}
+          
+          Recursos:
+             CPU: {{ normalized_cores }} cores
+             Memoria: {{ normalized_memory_gib }} GB
+             Storage: {{ normalized_storage }}
+             Network: {{ normalized_network }}
+          
+          Configuracao:
+             Auto Start: {{ normalized_auto_start }}
+             Run Strategy: {% if normalized_auto_start %}Always{% else %}RerunOnFailure{% endif %}
+
+             Log Level: {{ log_level | upper }}
+          
+          Execution Info:
+             Executado por: {{ current_user }}
+             Data/Hora: {{ current_timestamp }}
+          
+          ================================================================
+                                STATUS FINAL
+          ================================================================
+          
+          [OK] Execucao concluida com sucesso
+          
+          Proximos Passos:
+             1. Aguardar provisionamento do DataVolume (3-5 min)
+             2. Verificar status: oc get vm {{ vm_name }} -n {{ vm_namespace }}
+             3. Acessar console OpenShift > Virtualization > VMs
+             4. Conectar via virtctl quando status = Running
+          
+          Comandos Uteis:
+          
+             Ver tudo:
+             oc get vm,vmi,dv -n {{ vm_namespace }}
+          
+             Ver eventos:
+             oc get events -n {{ vm_namespace }}
+          
+             Console da VM:
+             virtctl console {{ vm_name }} -n {{ vm_namespace }}
+          
+             Web Console:
+             oc console
+          
+          ================================================================
+      tags: always
