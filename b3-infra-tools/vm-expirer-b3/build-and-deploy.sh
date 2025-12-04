@@ -4,7 +4,7 @@ set -e
 
 # Variáveis
 REGISTRY="quay.io/fcalomen"
-IMAGE_NAME="vm-expirer"
+IMAGE_NAME="vm-expirer-b3"
 VERSION="1.0.0"
 FULL_IMAGE="${REGISTRY}/${IMAGE_NAME}:${VERSION}"
 PYTHON_VERSION="312"  # ou 311

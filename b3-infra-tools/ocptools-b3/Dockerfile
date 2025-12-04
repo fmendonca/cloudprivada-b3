@@ -6,7 +6,7 @@ LABEL maintainer="SysAdmin Team" \
       io.k8s.display-name="OCP Tools" \
       io.openshift.tags="kubevirt,inventory,python" \
       summary="VM Inventory Tool" \
-      version="1.0.2"
+      version="1.0.0"
 
 # Definir variáveis de ambiente para pip
 ENV PYTHONUNBUFFERED=1 \

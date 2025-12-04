@@ -4,8 +4,8 @@ set -e
 
 # Variáveis
 REGISTRY="quay.io/fcalomen"
-IMAGE_NAME="snapshot-cleaner"
-VERSION="1.0.1"
+IMAGE_NAME="snapshot-cleaner-b3"
+VERSION="1.0.0"
 FULL_IMAGE="${REGISTRY}/${IMAGE_NAME}:${VERSION}"
 PYTHON_VERSION="312"  # ou 311
 
