@@ -55,7 +55,7 @@ spec:
       serviceAccountName: vm-expirer-sa
       containers:
       - name: vm-expirer
-        image: quay.io/fcalomen/vm-expirer:1.0.1
+        image: quay.io/fcalomen/vm-expirer-b3:1.0.0
         imagePullPolicy: Always
         ports:
         - containerPort: 8080
