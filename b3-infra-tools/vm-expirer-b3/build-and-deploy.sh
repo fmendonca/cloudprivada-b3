@@ -20,12 +20,6 @@ echo "=== Pushing to Registry ==="
 podman push ${FULL_IMAGE}
 podman push ${REGISTRY}/${IMAGE_NAME}:latest
 
-# echo "=== Updating Kubernetes manifests ==="
-# sed -i "s|<your-registry>/snapshot-cleaner:latest|${FULL_IMAGE}|g" k8s-manifests.yaml
-
-# echo "=== Deploying to OpenShift ==="
-# oc apply -f k8s-manifests.yaml
-
 echo "=== Deployment complete! ==="
 echo "Base Image: registry.access.redhat.com/ubi9/python-${PYTHON_VERSION}"
 echo "Final Image: ${FULL_IMAGE}"
