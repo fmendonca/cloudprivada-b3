@@ -10,6 +10,7 @@
     vm_storage: "{{ survey_vm_storage | default('30Gi') }}"
     vm_network: "{{ survey_vm_network | default('default') }}"
     selected_os: "{{ survey_so | default('rhel9') | lower }}"
+    expire_days: "{{ survey_vm_expire_days | default(7) | int }}"
 
     datasource_mappings:
       rhel8:
@@ -94,6 +95,7 @@
           Execution Info:
              Executado por: {{ current_user }}
              Data/Hora: {{ ansible_date_time.iso8601 | default('unknown') }}
+             Dias para Expiracao da VM: {{ expire_days }}
           
           ================================================================
       tags: always
@@ -476,13 +478,13 @@
               log-level: {{ log_level }}
               redhat.com/managed: "true"
               redhat.com/product: openshift-virtualization
+              expire: "{{ expire_days }}"
             annotations:
               redhat.com/created-by: "Red Hat Ansible Platform"
               redhat.com/created-by-user: "{{ current_user }}"
               redhat.com/created-at: "{{ current_timestamp }}"
           spec:
             runStrategy: {% if normalized_auto_start %}Always{% else %}RerunOnFailure{% endif %}
-
             dataVolumeTemplates:
               - apiVersion: cdi.kubevirt.io/v1beta1
                 kind: DataVolume
@@ -505,6 +507,7 @@
                   kubevirt.io/domain: {{ vm_name }}
                   app: {{ vm_name }}
                   redhat.com/managed: "true"
+                  expire: "{{ expire_days }}"
               spec:
                 domain:
                   cpu:
