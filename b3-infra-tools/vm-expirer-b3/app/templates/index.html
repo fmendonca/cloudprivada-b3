@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    
+    <!-- Bootstrap LOCAL - OFFLINE -->
+    <link href="/static/bootstrap/bootstrap.min.css" rel="stylesheet">
+    
+    <title>B3 VM Expirer</title>
+    <style>
+        /* CORES B3 - Azul e Roxo Oficial */
+        :root {
+            --b3-azul: #005EB8;
+            --b3-roxo: #6C3483;
+            --b3-azul-claro: #17A2B8;
+            --b3-success: #28A745;
+            --b3-light: #F8F9FA;
+            --b3-dark: #343A40;
+        }
+        
+        body {
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            min-height: 100vh;
+        }
+        
+        .b3-card {
+            border: none;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,94,184,0.1);
+            overflow: hidden;
+        }
+        
+        .b3-header {
+            background: linear-gradient(135deg, var(--b3-azul) 0%, var(--b3-roxo) 100%);
+            color: white;
+            padding: 2rem;
+        }
+        
+        .btn-b3-primary {
+            background: linear-gradient(135deg, var(--b3-azul), #004494);
+            border: none;
+            color: white;
+            font-weight: 600;
+            border-radius: 12px;
+            padding: 12px 24px;
+            transition: all 0.3s ease;
+        }
+        
+        .btn-b3-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(0,94,184,0.4);
+            color: white;
+        }
+        
+        .btn-b3-secondary {
+            background: linear-gradient(135deg, var(--b3-roxo), #5A2D72);
+            border: none;
+            color: white;
+            font-weight: 500;
+            border-radius: 12px;
+            padding: 12px 24px;
+            transition: all 0.3s ease;
+        }
+        
+        .btn-b3-secondary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(108,52,131,0.4);
+            color: white;
+        }
+        
+        .status-badge {
+            font-size: 1.1em;
+            padding: 10px 20px;
+            border-radius: 25px;
+        }
+        
+        .logo-b3 {
+            max-height: 60px;
+            max-width: 200px;
+            width: auto;
+            height: auto;
+        }
+        
+        .metric-card {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.08);
+            transition: transform 0.3s ease;
+        }
+        
+        .metric-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container py-5">
+        <div class="row justify-content-center">
+            <div class="col-lg-10 col-xl-8">
+                
+                <!-- HEADER B3 -->
+                <div class="b3-card mb-5">
+                    <div class="b3-header text-center">
+                        <img src="/static/img/logo.png" alt="B3 Logo" class="logo-b3 mb-3 mx-auto d-block">
+                        <h2 class="mb-2 fw-bold">🗑️ VM Expirer</h2>
+                        <p class="mb-0 opacity-90">Gerenciador Automático de VMs Temporárias</p>
+                    </div>
+                </div>
+
+                <!-- STATUS PRINCIPAL -->
+                <div class="b3-card mb-4">
+                    <div class="card-body text-center p-4">
+                        <div class="row g-3">
+                            <div class="col-md-4">
+                                <div class="metric-card pulse text-success">
+                                    <h3 class="text-success mb-1">🔄 ATIVO</h3>
+                                    <p class="mb-0 fw-bold fs-5">Scan Automático</p>
+                                    <small class="text-muted">A cada 1h</small>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="metric-card text-primary">
+                                    <h3 class="text-primary mb-1">🌐 Cluster-wide</h3>
+                                    <p class="mb-0 fw-bold fs-5">Todas Namespaces</p>
+                                    <small class="text-muted">86 namespaces monitoradas</small>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="metric-card text-info">
+                                    <h3 class="text-info mb-1">⚙️ Configurado</h3>
+                                    <p class="mb-0 fw-bold fs-5">Label: expire=X</p>
+                                    <small class="text-muted">Ex: expire="7"</small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- CONTROLES -->
+                <div class="b3-card mb-4">
+                    <div class="card-body p-4">
+                        <div class="row g-3 justify-content-center">
+                            <div class="col-md-5">
+                                <button id="scanBtn" class="btn btn-b3-primary w-100 fs-5">
+                                    🔍 Executar Scan MANUAL
+                                </button>
+                            </div>
+                            <div class="col-md-5">
+                                <button id="statusBtn" class="btn btn-b3-secondary w-100 fs-5">
+                                    📊 Status & Logs
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- RESULTADOS -->
+                <div id="results" class="b3-card" style="display: none;">
+                    <div class="card-body p-4">
+                        <h5 class="mb-3"><span class="badge bg-primary">📈 Último Scan</span></h5>
+                        <div id="resultsContent"></div>
+                    </div>
+                </div>
+
+                <!-- INSTRUÇÕES -->
+                <div class="b3-card mt-4">
+                    <div class="card-body p-4">
+                        <h6 class="mb-3 text-muted">📋 Como usar:</h6>
+                        <div class="row text-start">
+                            <div class="col-md-6">
+                                <div class="mb-3 p-3 bg-light rounded">
+                                    <strong>1. Criar VM temporária:</strong>
+                                    <pre class="mt-2 mb-0 small bg-white p-2 rounded">de>labels:
+  expire: "7"  # 7 dias</code></pre>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="mb-3 p-3 bg-light rounded">
+                                    <strong>2. Automático:</strong>
+                                    <ul class="mb-0 small">
+                                        <li>✅ Scan a cada 1h</li>
+                                        <li>✅ Deleta VMs expiradas</li>
+                                        <li>✅ Log completo</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap JS LOCAL -->
+    <script src="/static/bootstrap/bootstrap.bundle.min.js"></script>
+    
+    <script>
+        function showResults(data) {
+            const resultsDiv = document.getElementById('results');
+            const resultsContent = document.getElementById('resultsContent');
+            
+            resultsContent.innerHTML = `
+                <div class="row g-3">
+                    <div class="col-md-3">
+                        <div class="text-center p-3 bg-success bg-opacity-10 rounded">
+                            <h4 class="text-success mb-1">${data.data.deleted_vms}</h4>
+                            <small class="text-success fw-bold">VMs Deletadas</small>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="text-center p-3 bg-primary bg-opacity-10 rounded">
+                            <h4 class="text-primary mb-1">${data.data.total_namespaces}</h4>
+                            <small class="text-primary fw-bold">Namespaces</small>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="text-center p-3 bg-info bg-opacity-10 rounded">
+                            <h4 class="text-info mb-1">${data.data.total_vms_checked}</h4>
+                            <small class="text-info fw-bold">VMs Verificadas</small>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="text-center p-3 bg-secondary bg-opacity-10 rounded">
+                            <h4 class="text-secondary mb-1">${new Date(data.data.timestamp).toLocaleString('pt-BR')}</h4>
+                            <small class="text-secondary fw-bold">Executado</small>
+                        </div>
+                    </div>
+                </div>
+            `;
+            resultsDiv.style.display = 'block';
+        }
+
+        document.getElementById('scanBtn').addEventListener('click', async () => {
+            const btn = document.getElementById('scanBtn');
+            const originalText = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Executando...';
+
+            try {
+                const response = await fetch('/scan', { method: 'POST' });
+                const data = await response.json();
+                if (data.success) {
+                    showResults(data);
+                } else {
+                    alert('Erro: ' + data.message);
+                }
+            } catch (error) {
+                alert('Erro de conexão: ' + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+            }
+        });
+
+        document.getElementById('statusBtn').addEventListener('click', async () => {
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+                alert('Status Automático:\n' + JSON.stringify(data, null, 2));
+            } catch (error) {
+                alert('Erro ao obter status: ' + error.message);
+            }
+        });
+    </script>
+</body>
+</html>

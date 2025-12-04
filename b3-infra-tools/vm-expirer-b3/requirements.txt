@@ -1,0 +1,5 @@
+kubernetes
+flask==3.0.3
+python-dateutil==2.9.0.post0
+requests==2.32.3
+gunicorn==22.0.0

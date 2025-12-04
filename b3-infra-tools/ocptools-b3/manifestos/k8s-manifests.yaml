@@ -1,0 +1,149 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infra-tools
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vm-inventory-sa
+  namespace: infra-tools
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vm-inventory-reader
+rules:
+  - apiGroups: ["kubevirt.io"]
+    resources:
+      - virtualmachineinstances
+      - virtualmachines
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["subresources.kubevirt.io"]
+    resources:
+      - virtualmachineinstances/guestosinfo
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vm-inventory-reader-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vm-inventory-reader
+subjects:
+  - kind: ServiceAccount
+    name: vm-inventory-sa
+    namespace: infra-tools
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: vm-inventory
+  namespace: infra-tools
+  labels:
+    app: vm-inventory
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: vm-inventory
+  template:
+    metadata:
+      labels:
+        app: vm-inventory
+    spec:
+      serviceAccountName: vm-inventory-sa
+      serviceAccount: vm-inventory-sa
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: vm-inventory
+          image: "quay.io/fcalomen/ocptools:1.0.0"
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: DEBUG_GUESTOSINFO
+              value: "0"
+            # Polling em milissegundos (aqui: 10 segundos)
+            - name: POLL_INTERVAL_MS
+              value: "10000"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 10
+            timeoutSeconds: 1
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 30
+            timeoutSeconds: 1
+            periodSeconds: 30
+            successThreshold: 1
+            failureThreshold: 3
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      schedulerName: default-scheduler
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+      maxSurge: 25%
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vm-inventory
+  namespace: infra-tools
+  labels:
+    app: vm-inventory
+spec:
+  selector:
+    app: vm-inventory
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http 
+      protocol: TCP
+  type: ClusterIP
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: vm-inventory
+  namespace: infra-tools
+  labels:
+    app: vm-inventory
+spec:
+  to:
+    kind: Service
+    name: vm-inventory
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+  wildcardPolicy: None

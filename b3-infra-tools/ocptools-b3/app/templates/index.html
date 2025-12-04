@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8">
+  <title>Petrobras - Painel de VMs</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <!-- Bootstrap local -->
+  <link
+    href="{{ url_for('static', filename='css/bootstrap.min.css') }}"
+    rel="stylesheet"
+  >
+
+  <style>
+    :root {
+      --pb-green: #00923f;
+      --pb-yellow: #ffcc00;
+      --pb-gray-bg: #f5f5f5;
+    }
+
+    body {
+      background-color: var(--pb-gray-bg);
+      color: #222;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .navbar-pb {
+      background-color: #ffffff;
+      border-bottom: 1px solid #e3e3e3;
+    }
+
+    .navbar-pb .brand-title {
+      font-weight: 600;
+      color: #333;
+    }
+
+    .navbar-pb .brand-subtitle {
+      font-size: 0.85rem;
+      color: #777;
+    }
+
+    .navbar-pb img {
+      height: 34px;
+      margin-right: 10px;
+    }
+
+    .page-wrapper {
+      padding: 24px 0 32px;
+    }
+
+    .card-pb {
+      border-radius: 0.75rem;
+      border: 1px solid #e0e0e0;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.06);
+      background-color: #ffffff;
+    }
+
+    .card-pb-header {
+      background: #ffffff;
+      border-bottom: 1px solid #e4e4e4;
+      border-radius: 0.75rem 0.75rem 0 0 !important;
+    }
+
+    .pb-subtitle {
+      font-size: 0.9rem;
+      color: #555;
+    }
+
+    .table thead th {
+      background-color: #ffffff;
+      color: #333;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      border-bottom: 2px solid #e3e3e3;
+      white-space: nowrap;
+    }
+
+    .table tbody td {
+      vertical-align: middle;
+      font-size: 0.9rem;
+    }
+
+    .table-hover tbody tr:hover {
+      background-color: #f4fbf7;
+    }
+
+    .badge-state-on {
+      background-color: var(--pb-green);
+    }
+
+    .badge-state-off {
+      background-color: #c62828;
+    }
+
+    .badge-agent-yes {
+      background-color: var(--pb-green);
+    }
+
+    .badge-agent-no {
+      background-color: #c62828;
+    }
+
+    .badge-pill {
+      border-radius: 999px;
+      padding-inline: 0.9rem;
+      padding-block: 0.25rem;
+      font-weight: 600;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 6px;
+    }
+
+    .status-dot-on {
+      background-color: var(--pb-green);
+    }
+
+    .status-dot-off {
+      background-color: #c62828;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Topo e conteúdo usando o MESMO container-fluid -->
+  <div class="container-fluid px-3 px-md-4">
+
+    <nav class="navbar navbar-pb">
+      <div class="d-flex align-items-center py-2">
+        <img src="{{ url_for('static', filename='img/logo.png') }}" alt="Petrobras">
+        <div class="d-flex flex-column">
+          <span class="brand-title">B3 - Painel de VMs</span>
+          <span class="brand-subtitle">Inventário de VMs</span>
+        </div>
+      </div>
+    </nav>
+
+    <div class="page-wrapper">
+      <div class="card card-pb">
+
+        <div class="card-header card-pb-header px-4 py-3">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div>
+              <h5 class="mb-0">Painel de VMs</h5>
+              <div class="pb-subtitle" id="subtitle-vms">
+                Carregando informações das VMs...
+              </div>
+            </div>
+            <div class="text-end">
+              <span class="badge bg-secondary" id="badge-vms">0 VMs</span>
+            </div>
+          </div>
+
+          <!-- Campo de busca por nome da VM -->
+          <div class="d-flex flex-row align-items-center mt-2">
+            <label for="search-vm" class="form-label mb-0 me-2">Buscar VM:</label>
+            <input id="search-vm"
+                   class="form-control form-control-sm w-auto"
+                   type="text"
+                   placeholder="Digite parte do nome da VM"
+                   autocomplete="off" />
+          </div>
+        </div>
+
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-hover table-bordered mb-0">
+              <thead>
+                <tr>
+                  <th>Nome da VM</th>
+                  <th>Namespace</th>
+                  <th class="text-center">Estado da VM</th>
+                  <th>BootStart</th>
+                  <th>Sistema Operacional</th>
+                  <th>Node Running</th>
+                  <th>IP da VM</th>
+                  <th class="text-center">Agent Instalado</th>
+                  <th>Agent Version</th>
+                </tr>
+              </thead>
+              <tbody id="tb-vms">
+                <!-- Linhas preenchidas dinamicamente -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div> <!-- /container-fluid -->
+
+  <!-- Bootstrap JS local -->
+  <script src="{{ url_for('static', filename='js/bootstrap.bundle.min.js') }}"></script>
+
+  <script>
+    // Valor passado pelo backend (ms); se não vier, usa 10000
+    const POLL_INTERVAL_MS = {{ poll_interval_ms | default(10000) }};
+
+    let allRows = [];
+
+    function badge(content, cls) {
+      return `<span class="badge badge-pill ${cls}">${content}</span>`;
+    }
+
+    function dot(on) {
+      return `<span class="status-dot ${on ? "status-dot-on" : "status-dot-off"}"></span>`;
+    }
+
+    function renderRow(row) {
+      return `<tr>
+        <td><strong>${row.name}</strong></td>
+        <td><span class="badge bg-light text-dark border">${row.namespace}</span></td>
+        <td class="text-center">
+          ${dot(row.state === 'Ligado')}
+          ${badge(row.state, row.state === 'Ligado' ? 'badge-state-on' : 'badge-state-off')}
+        </td>
+        <td>${row.boot_start}</td>
+        <td>${row.os_name}</td>
+        <td>${row.node_running}</td>
+        <td>${row.vm_ip}</td>
+        <td class="text-center">
+          ${badge(row.agent_instalado, row.agent_instalado === 'Sim' ? 'badge-agent-yes' : 'badge-agent-no')}
+        </td>
+        <td>${row.agent_version}</td>
+      </tr>`;
+    }
+
+    // Renderiza a tabela considerando o filtro
+    function updateTable() {
+      const filter = document.getElementById('search-vm').value.toLowerCase();
+      const filtered = allRows.filter(row =>
+        row.name.toLowerCase().includes(filter)
+      );
+
+      document.getElementById('tb-vms').innerHTML =
+        filtered.map(renderRow).join('');
+
+      document.getElementById('subtitle-vms').innerText =
+        filtered.length + " VM(s) encontrada(s) no cluster.";
+      document.getElementById('badge-vms').innerText =
+        filtered.length + " VMs";
+    }
+
+    function pollVMs() {
+      fetch('/api/vms')
+        .then(response => response.json())
+        .then(rows => {
+          allRows = rows;
+          updateTable();
+        })
+        .catch(err => {
+          console.error("Erro buscando /api/vms:", err);
+        });
+    }
+
+    window.onload = function () {
+      pollVMs();
+      // Evento de filtro em tempo real
+      document.getElementById('search-vm').addEventListener('input', updateTable);
+      setInterval(pollVMs, POLL_INTERVAL_MS);
+    };
+  </script>
+</body>
+</html>
