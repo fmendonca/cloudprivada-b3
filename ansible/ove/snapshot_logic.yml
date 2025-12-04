@@ -1,0 +1,89 @@
+---
+- name: Criar snapshot da VM {{ vm_data.name }}
+  vars:
+    snapshot_name_final: >-
+      {{
+        vm_data.name ~ '-snapshot-' ~ timestamp
+        if user_snapshot_name | lower == 'snapshot'
+        else user_snapshot_name | regex_replace('[^a-zA-Z0-9-]', '') | lower
+      }}
+  block:
+
+    - name: Verificar snapshots existentes
+      kubernetes.core.k8s_info:
+        api_version: snapshot.kubevirt.io/v1alpha1
+        kind: VirtualMachineSnapshot
+        namespace: "{{ vm_data.namespace }}"
+      register: existing_snaps
+
+    - name: Definir se snapshot já existe
+      set_fact:
+        snapshot_exists: >-
+          {{
+            existing_snaps.resources
+            | selectattr('metadata.name', 'equalto', snapshot_name_final)
+            | list
+            | length > 0
+          }}
+
+    - name: Excluir snapshot existente (overwrite=true)
+      kubernetes.core.k8s:
+        state: absent
+        api_version: snapshot.kubevirt.io/v1alpha1
+        kind: VirtualMachineSnapshot
+        namespace: "{{ vm_data.namespace }}"
+        name: "{{ snapshot_name_final }}"
+      when:
+        - snapshot_exists
+        - overwrite_snapshot_bool
+
+    - name: Abortar se snapshot existe e overwrite=false
+      fail:
+        msg: >
+          Snapshot '{{ snapshot_name_final }}' já existe para a VM '{{ vm_data.name }}'
+          e overwrite=false.
+      when:
+        - snapshot_exists
+        - not overwrite_snapshot_bool
+
+    - name: Criar novo snapshot
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: snapshot.kubevirt.io/v1alpha1
+          kind: VirtualMachineSnapshot
+          metadata:
+            name: "{{ snapshot_name_final }}"
+            namespace: "{{ vm_data.namespace }}"
+            annotations: "{{ vm_snapshot_annotations }}"
+          spec:
+            source:
+              apiGroup: kubevirt.io
+              kind: VirtualMachine
+              name: "{{ vm_data.name }}"
+      register: snap_create
+
+    - name: Aguardar conclusão do snapshot (se habilitado)
+      kubernetes.core.k8s_info:
+        api_version: snapshot.kubevirt.io/v1alpha1
+        kind: VirtualMachineSnapshot
+        namespace: "{{ vm_data.namespace }}"
+        name: "{{ snapshot_name_final }}"
+      register: snap_state
+      retries: 30
+      delay: 5
+      until: >
+        not wait_for_completion
+        or
+        (
+          snap_state.resources[0].status.readyToUse is defined and
+          snap_state.resources[0].status.readyToUse | bool
+        )
+
+    - name: Exibir resultado final
+      debug:
+        msg:
+          - "Snapshot '{{ snapshot_name_final }}' criado com sucesso!"
+          - "VM: {{ vm_data.name }}"
+          - "Namespace: {{ vm_data.namespace }}"
+          - "Ready: {{ snap_state.resources[0].status.readyToUse | default('N/A') }}"

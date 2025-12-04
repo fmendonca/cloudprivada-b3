@@ -1,0 +1,279 @@
+---
+- name: Listar PVCs de VM no OpenShift Virtualization
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    validate_certs: false
+
+  tasks:
+    - name: Validar variáveis obrigatórias
+      ansible.builtin.assert:
+        that:
+          - vm_name is defined
+          - vm_namespace is defined
+        fail_msg: "Variáveis obrigatórias não definidas: vm_name, vm_namespace"
+        success_msg: "Validação de variáveis concluída com sucesso"
+
+    - name: Converter variáveis para string se vierem como lista
+      ansible.builtin.set_fact:
+        vm_name_str: "{{ vm_name | first if vm_name is iterable and vm_name is not string else vm_name }}"
+        vm_namespace_str: "{{ vm_namespace | first if vm_namespace is iterable and vm_namespace is not string else vm_namespace }}"
+
+    - name: Converter show_details para boolean
+      ansible.builtin.set_fact:
+        show_details_bool: "{{ show_details | default('true') | bool }}"
+
+    - name: Definir configurações finais
+      ansible.builtin.set_fact:
+        final_vm_name: "{{ vm_name_str }}"
+        final_vm_namespace: "{{ vm_namespace_str }}"
+
+    - name: Exibir informações da consulta
+      ansible.builtin.debug:
+        msg:
+          - "=== CONSULTA DE PVCs ==="
+          - "VM: {{ final_vm_name }}"
+          - "Namespace: {{ final_vm_namespace }}"
+          - "Detalhes adicionais: {{ 'Habilitado' if show_details_bool else 'Desabilitado' }}"
+
+    - name: Obter configuração atual da VM
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ final_vm_name }}"
+        namespace: "{{ final_vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: vm_check
+
+    - name: Falhar se VM não existe
+      ansible.builtin.fail:
+        msg: "VM '{{ final_vm_name }}' não encontrada no namespace '{{ final_vm_namespace }}'"
+      when: vm_check.resources | length == 0
+
+    - name: Extrair configuração da VM
+      ansible.builtin.set_fact:
+        current_vm: "{{ vm_check.resources[0] }}"
+        current_volumes: "{{ vm_check.resources[0].spec.template.spec.volumes | default([]) }}"
+        current_disks: "{{ vm_check.resources[0].spec.template.spec.domain.devices.disks | default([]) }}"
+
+    - name: Extrair nomes dos PVCs da VM
+      ansible.builtin.set_fact:
+        vm_pvc_names: "{{ current_volumes | selectattr('persistentVolumeClaim', 'defined') | map(attribute='persistentVolumeClaim.claimName') | list }}"
+
+    - name: Obter informações detalhadas dos PVCs
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        name: "{{ item }}"
+        namespace: "{{ final_vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: pvc_details
+      loop: "{{ vm_pvc_names }}"
+      when: vm_pvc_names | length > 0
+
+    - name: Obter todos os PVCs do namespace (para verificar outros PVCs relacionados)
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        namespace: "{{ final_vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+        label_selectors:
+          - "app={{ final_vm_name }}"
+      register: all_vm_pvcs
+      when: show_details_bool
+
+    - name: Encontrar volume name para cada PVC
+      ansible.builtin.set_fact:
+        pvc_volume_map: "{{ pvc_volume_map | default({}) | combine({item.persistentVolumeClaim.claimName: item.name}) }}"
+      loop: "{{ current_volumes }}"
+      when: item.persistentVolumeClaim is defined
+
+    - name: Preparar lista de PVCs com detalhes
+      ansible.builtin.set_fact:
+        pvc_list: "{{ pvc_list | default([]) + [pvc_info] }}"
+      vars:
+        pvc_info:
+          name: "{{ item.resources[0].metadata.name }}"
+          size: "{{ item.resources[0].spec.resources.requests.storage }}"
+          status: "{{ item.resources[0].status.phase }}"
+          storage_class: "{{ item.resources[0].spec.storageClassName | default('N/A') }}"
+          access_mode: "{{ item.resources[0].spec.accessModes[0] | default('N/A') }}"
+          volume_mode: "{{ item.resources[0].spec.volumeMode | default('Filesystem') }}"
+          creation_time: "{{ item.resources[0].metadata.creationTimestamp }}"
+          volume_name: "{{ pvc_volume_map[item.resources[0].metadata.name] | default('N/A') }}"
+      loop: "{{ pvc_details.results }}"
+      when: 
+        - pvc_details is defined
+        - item.resources | length > 0
+
+    - name: Preparar lista de PVCs adicionais (com label app)
+      ansible.builtin.set_fact:
+        additional_pvcs: "{{ additional_pvcs | default([]) + [additional_pvc_info] }}"
+      vars:
+        additional_pvc_info:
+          name: "{{ item.metadata.name }}"
+          size: "{{ item.spec.resources.requests.storage }}"
+          status: "{{ item.status.phase }}"
+          storage_class: "{{ item.spec.storageClassName | default('N/A') }}"
+          access_mode: "{{ item.spec.accessModes[0] | default('N/A') }}"
+          volume_mode: "{{ item.spec.volumeMode | default('Filesystem') }}"
+          creation_time: "{{ item.metadata.creationTimestamp }}"
+          in_vm: "{{ item.metadata.name in vm_pvc_names }}"
+      loop: "{{ all_vm_pvcs.resources }}"
+      when: 
+        - show_details_bool
+        - all_vm_pvcs is defined
+        - all_vm_pvcs.resources | length > 0
+
+    - name: Mapear discos com volumes e PVCs
+      ansible.builtin.set_fact:
+        disk_volume_mapping: "{{ disk_volume_mapping | default([]) + [disk_mapping] }}"
+      vars:
+        volume_info: "{{ current_volumes | selectattr('name', 'equalto', item.name) | first | default({}) }}"
+        is_pvc: "{{ volume_info.persistentVolumeClaim is defined }}"
+        pvc_name: "{{ volume_info.persistentVolumeClaim.claimName if is_pvc else 'N/A' }}"
+        disk_mapping:
+          disk_name: "{{ item.name }}"
+          volume_name: "{{ item.name }}"
+          pvc_name: "{{ pvc_name }}"
+          bus_type: "{{ item.disk.bus | default('N/A') }}"
+          disk_type: "{{ 'PVC' if is_pvc else 'Other' }}"
+      loop: "{{ current_disks }}"
+      when: show_details_bool
+
+    - name: Exibir resumo da VM
+      ansible.builtin.debug:
+        msg:
+          - "=== RESUMO DA VM ==="
+          - "VM: {{ final_vm_name }}"
+          - "Namespace: {{ final_vm_namespace }}"
+          - "Status: {{ current_vm.status.printableStatus | default('Unknown') }}"
+          - "Total de Discos: {{ current_disks | length }}"
+          - "Total de Volumes: {{ current_volumes | length }}"
+          - "PVCs Anexados: {{ vm_pvc_names | length }}"
+
+    - name: Exibir lista básica de PVCs
+      ansible.builtin.debug:
+        msg:
+          - "=== PVCs ANEXADOS À VM ==="
+      when: 
+        - not show_details_bool
+        - vm_pvc_names | length > 0
+
+    - name: Exibir cada PVC (modo básico)
+      ansible.builtin.debug:
+        msg: "- {{ item }}"
+      loop: "{{ vm_pvc_names }}"
+      when: 
+        - not show_details_bool
+        - vm_pvc_names | length > 0
+
+    - name: Exibir mapeamento de discos e volumes
+      ansible.builtin.debug:
+        msg: |
+          === MAPEAMENTO DISCOS/VOLUMES ===
+          {% for mapping in disk_volume_mapping %}
+          Disco: {{ mapping.disk_name }}
+            Volume: {{ mapping.volume_name }}
+            PVC: {{ mapping.pvc_name }}
+            Bus: {{ mapping.bus_type }}
+            Tipo: {{ mapping.disk_type }}
+          {% endfor %}
+      when: 
+        - show_details_bool
+        - disk_volume_mapping is defined
+
+    - name: Exibir detalhes dos PVCs anexados à VM
+      ansible.builtin.debug:
+        msg: |
+          === PVCs ANEXADOS À VM (DETALHADO) ===
+          {% for pvc in pvc_list | default([]) %}
+          Nome: {{ pvc.name }}
+            Tamanho: {{ pvc.size }}
+            Status: {{ pvc.status }}
+            Storage Class: {{ pvc.storage_class }}
+            Access Mode: {{ pvc.access_mode }}
+            Volume Mode: {{ pvc.volume_mode }}
+            Volume Name: {{ pvc.volume_name }}
+            Criado em: {{ pvc.creation_time }}
+          {% endfor %}
+      when: 
+        - show_details_bool
+        - pvc_list is defined 
+        - pvc_list | length > 0
+
+    - name: Exibir PVCs adicionais com label da VM
+      ansible.builtin.debug:
+        msg: |
+          === PVCs COM LABEL DA VM ===
+          {% for pvc in additional_pvcs | default([]) %}
+          Nome: {{ pvc.name }}
+            Tamanho: {{ pvc.size }}
+            Status: {{ pvc.status }}
+            Storage Class: {{ pvc.storage_class }}
+            Anexado à VM: {{ 'Sim' if pvc.in_vm else 'Não' }}
+            Criado em: {{ pvc.creation_time }}
+          {% endfor %}
+      when: 
+        - show_details_bool
+        - additional_pvcs is defined 
+        - additional_pvcs | length > 0
+
+    - name: Exibir mensagem se nenhum PVC encontrado
+      ansible.builtin.debug:
+        msg:
+          - "=== RESULTADO ==="
+          - "Nenhum PVC encontrado anexado à VM '{{ final_vm_name }}'"
+          - "A VM pode estar usando outros tipos de volumes (ConfigMap, Secret, etc.)"
+      when: vm_pvc_names | length == 0
+
+    - name: Exibir comandos úteis (modo básico)
+      ansible.builtin.debug:
+        msg:
+          - "=== COMANDOS ÚTEIS ==="
+          - "Ver PVCs do namespace:"
+          - "  oc get pvc -n {{ final_vm_namespace }}"
+          - ""
+          - "Ver VM:"
+          - "  oc get vm {{ final_vm_name }} -n {{ final_vm_namespace }}"
+      when: not show_details_bool
+
+    - name: Exibir comandos úteis (modo detalhado)
+      ansible.builtin.debug:
+        msg: |
+          === COMANDOS ÚTEIS ===
+          Ver VM completa:
+            oc get vm {{ final_vm_name }} -n {{ final_vm_namespace }} -o yaml
+          
+          Ver todos os PVCs do namespace:
+            oc get pvc -n {{ final_vm_namespace }}
+          
+          Ver PVCs com label da VM:
+            oc get pvc -n {{ final_vm_namespace }} -l app={{ final_vm_name }}
+          
+          Detalhes de PVCs específicos:
+          {% for pvc_name in vm_pvc_names %}
+            oc describe pvc {{ pvc_name }} -n {{ final_vm_namespace }}
+          {% endfor %}
+      when: show_details_bool
+
+    - name: Criar resultado estruturado para automação
+      ansible.builtin.set_fact:
+        vm_pvc_result:
+          vm_name: "{{ final_vm_name }}"
+          vm_namespace: "{{ final_vm_namespace }}"
+          vm_status: "{{ current_vm.status.printableStatus | default('Unknown') }}"
+          total_disks: "{{ current_disks | length }}"
+          total_volumes: "{{ current_volumes | length }}"
+          pvc_names: "{{ vm_pvc_names }}"
+          attached_pvcs: "{{ pvc_list | default([]) }}"
+          additional_pvcs: "{{ additional_pvcs | default([]) if show_details_bool else [] }}"
+          disk_mappings: "{{ disk_volume_mapping | default([]) if show_details_bool else [] }}"
+          details_enabled: "{{ show_details_bool }}"
+
+    - name: Exibir resultado estruturado
+      ansible.builtin.debug:
+        var: vm_pvc_result
+        verbosity: 1

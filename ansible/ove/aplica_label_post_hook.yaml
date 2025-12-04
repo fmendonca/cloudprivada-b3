@@ -1,0 +1,137 @@
+- name: Main
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - plan.yml
+    - workload.yml
+  vars:
+    dest_cluster_secret: "" # Secret com a credencial do hosted cluster necessario permissão read secret na service account default ns openshift-mtv
+    vm_name: "{{ resource.name }}"         # carregado a partir do workload.yml injetado na como configmap no pod
+    vm_name: "{{ vm.vm1.vm0.name | lower() | replace('_', '-')  }}"         # carregado a partir do workload.yml injetado na como configmap no pod    # carregado a partir do plan.yml injetado na como configmap no pod
+    backup_state: "present"  # present ou absent - será preenchido via survey
+  tasks:
+  - name: Gather dest cluster credentials
+    kubernetes.core.k8s_info:
+      api_version: v1
+      kind: Secret
+      name: "{{ dest_cluster_secret }}"
+      namespace: openshift-mtv
+    register: dest_cluster_credentials
+  
+  - name: Generate kubeconfig
+    ansible.builtin.copy:
+      dest: ~/kubeconfig
+      content: |
+        apiVersion: v1
+        clusters:
+        - cluster:
+            certificate-authority-data: {{ dest_cluster_credentials.resources[0].data.cacert }}
+            server: {{ dest_cluster_credentials.resources[0].data.url | b64decode }}
+          name: kubernetes
+        contexts:
+        - context:
+            cluster: kubernetes
+            user: default
+            namespace: default
+          name: default-context
+        current-context: default-context
+        kind: Config
+        preferences: {}
+        users:
+        - name: default
+          user:
+            token: {{ dest_cluster_credentials.resources[0].data.token | b64decode }}
+    no_log: true
+
+  - name: Obter detalhes da VirtualMachine
+    kubernetes.core.k8s_info:
+      kubeconfig: ~/kubeconfig # altera para kubeconfig gerado a partir da secret
+      validate_certs: false
+      api_version: kubevirt.io/v1
+      kind: VirtualMachine
+      name: "{{ vm_name }}"
+      namespace: "{{ vm_namespace }}"
+    register: vm_info
+  
+
+  - debug:
+      var: vm_info.resources[0].spec.template.spec.volumes
+
+  - name: Extrair nomes dos PVCs usados pela VM
+    ansible.builtin.set_fact:
+      vm_pvcs: "{{ vm_info.resources[0].spec.dataVolumeTemplates | default([]) | map(attribute='metadata.name') | list }}"
+  
+  - debug:
+      var: vm_pvcs
+
+  - name: Se não houver DataVolumeTemplates, tentar pegar volumes normais com PersistentVolumeClaims
+    ansible.builtin.set_fact:
+      vm_pvcs: >-
+        {{
+          vm_pvcs +
+          (
+            vm_info.resources[0].spec.template.spec.volumes | selectattr('persistentVolumeClaim', 'defined') | map(attribute='persistentVolumeClaim.claimName') | list
+            if vm_info.resources[0].spec.template.spec.volumes is defined else []
+          )
+        }}
+  - debug:
+      var: vm_pvcs
+
+  - name: Atualizar label na VirtualMachine
+    kubernetes.core.k8s:
+      kubeconfig: ~/kubeconfig # altera para kubeconfig gerado a partir da secret
+      validate_certs: false
+      api_version: kubevirt.io/v1
+      kind: VirtualMachine
+      name: "{{ vm_name }}"
+      namespace: "{{ vm_namespace }}"
+      definition:
+        metadata:
+          labels:
+            Backup: "Com-Backup"
+
+  - name: Atualizar label nos PVCs da VM
+    kubernetes.core.k8s:
+      kubeconfig: ~/kubeconfig # altera para kubeconfig gerado a partir da secret
+      validate_certs: false
+      api_version: v1
+      kind: PersistentVolumeClaim
+      name: "{{ item }}"
+      namespace: "{{ vm_namespace }}"
+      merge_type:
+        - strategic-merge
+      definition:
+        metadata:
+          labels:
+            Backup: "Com-Backup"
+    loop: "{{ vm_pvcs }}"
+
+  - name: Obter PVCs atualizados para extrair os PVs
+    kubernetes.core.k8s_info:
+      kubeconfig: ~/kubeconfig # altera para kubeconfig gerado a partir da secret
+      validate_certs: false
+      api_version: v1
+      kind: PersistentVolumeClaim
+      namespace: "{{ vm_namespace }}"
+      name: "{{ item }}"
+    loop: "{{ vm_pvcs }}"
+    register: pvc_details
+
+  - name: Extrair nomes dos PVs de cada PVC
+    ansible.builtin.set_fact:
+      pv_names: "{{ pvc_details.results | map(attribute='resources') | map('first') | map(attribute='spec.volumeName') | list }}"
+
+  - name: Atualizar label nos PVs associados
+    kubernetes.core.k8s:
+      kubeconfig: ~/kubeconfig # altera para kubeconfig gerado a partir da secret
+      validate_certs: false
+      api_version: v1
+      kind: PersistentVolume
+      name: "{{ item }}"
+      merge_type:
+        - strategic-merge
+      definition:
+        metadata:
+          labels:
+            Backup: "Com-Backup"
+    loop: "{{ pv_names }}"

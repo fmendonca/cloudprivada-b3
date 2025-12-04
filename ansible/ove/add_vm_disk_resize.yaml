@@ -1,0 +1,481 @@
+---
+- name: Expandir Disco e Resize Filesystem em VM RHEL no OpenShift Virtualization
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    validate_certs: false
+    # Timeout para operações em segundos
+    operation_timeout: 300
+    # Intervalo entre verificações
+    check_interval: 10
+
+  tasks:
+    - name: Validar variáveis obrigatórias
+      ansible.builtin.assert:
+        that:
+          - vm_name is defined
+          - vm_namespace is defined
+          - disk_name is defined
+          - new_disk_size is defined
+        fail_msg: |
+          Variáveis obrigatórias não definidas:
+          - vm_name: Nome da VM
+          - vm_namespace: Namespace da VM
+          - disk_name: Nome do disco a expandir
+          - new_disk_size: Novo tamanho do disco (ex: 50Gi, 100Gi)
+        success_msg: "Validação de variáveis concluída com sucesso"
+
+    - name: Converter variáveis para string se vierem como lista
+      ansible.builtin.set_fact:
+        vm_name_str: "{{ vm_name | first if vm_name is iterable and vm_name is not string else vm_name }}"
+        vm_namespace_str: "{{ vm_namespace | first if vm_namespace is iterable and vm_namespace is not string else vm_namespace }}"
+        disk_name_str: "{{ disk_name | first if disk_name is iterable and disk_name is not string else disk_name }}"
+        new_disk_size_str: "{{ new_disk_size | first if new_disk_size is iterable and new_disk_size is not string else new_disk_size }}"
+        vm_username_str: "{{ vm_username | first if vm_username is defined and vm_username is iterable and vm_username is not string else vm_username | default('') }}"
+        vm_password_str: "{{ vm_password | first if vm_password is defined and vm_password is iterable and vm_password is not string else vm_password | default('') }}"
+        vm_ssh_key_str: "{{ vm_ssh_key | first if vm_ssh_key is defined and vm_ssh_key is iterable and vm_ssh_key is not string else vm_ssh_key | default('') }}"
+        target_mount_str: "{{ target_mount | first if target_mount is defined and target_mount is iterable and target_mount is not string else target_mount | default('') }}"
+
+    - name: Normalizar novo tamanho do disco
+      ansible.builtin.set_fact:
+        normalized_new_size: "{{ new_disk_size_str | string | trim | regex_replace(' ', '') }}"
+
+    - name: Validar formato do novo tamanho do disco
+      ansible.builtin.assert:
+        that:
+          - normalized_new_size is regex('^[0-9]+[.]?[0-9]*(Gi|Mi|Ti|G|M|T|GiB|MiB|TiB)$', ignorecase=True)
+        fail_msg: |
+          Tamanho do disco inválido: '{{ new_disk_size_str }}'
+          Formatos aceitos: 10Gi, 50Gi, 100Gi, 1Ti
+        success_msg: "Formato do novo tamanho do disco validado: {{ normalized_new_size }}"
+
+    - name: Converter para formato Kubernetes padrão
+      ansible.builtin.set_fact:
+        k8s_new_size: >-
+          {%- if normalized_new_size is regex('Gi$|Mi$|Ti$', ignorecase=True) -%}
+            {{ normalized_new_size }}
+          {%- elif normalized_new_size is regex('G$', ignorecase=True) -%}
+            {{ normalized_new_size | regex_replace('G$', 'Gi', ignorecase=True) }}
+          {%- elif normalized_new_size is regex('M$', ignorecase=True) -%}
+            {{ normalized_new_size | regex_replace('M$', 'Mi', ignorecase=True) }}
+          {%- elif normalized_new_size is regex('T$', ignorecase=True) -%}
+            {{ normalized_new_size | regex_replace('T$', 'Ti', ignorecase=True) }}
+          {%- else -%}
+            {{ normalized_new_size }}
+          {%- endif -%}
+
+    - name: Definir configurações finais
+      ansible.builtin.set_fact:
+        final_vm_name: "{{ vm_name_str }}"
+        final_vm_namespace: "{{ vm_namespace_str }}"
+        final_disk_name: "{{ disk_name_str }}"
+        final_new_size: "{{ k8s_new_size }}"
+        final_pvc_name: "{{ vm_name_str }}-{{ disk_name_str }}-pvc"
+        final_vm_username: "{{ vm_username_str }}"
+        final_vm_password: "{{ vm_password_str }}"
+        final_vm_ssh_key: "{{ vm_ssh_key_str }}"
+        final_target_mount: "{{ target_mount_str }}"
+
+    - name: Exibir configuração da expansão
+      ansible.builtin.debug:
+        msg:
+          - "=== CONFIGURACAO DA EXPANSAO ==="
+          - "VM: {{ final_vm_name }}"
+          - "Namespace: {{ final_vm_namespace }}"
+          - "Disco: {{ final_disk_name }}"
+          - "Novo Tamanho: {{ final_new_size }}"
+          - "PVC: {{ final_pvc_name }}"
+          - "Target Mount: {{ final_target_mount if final_target_mount != '' else 'Auto-detectar' }}"
+
+    - name: Verificar se VM existe
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ final_vm_name }}"
+        namespace: "{{ final_vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: vm_check
+
+    - name: Falhar se VM não existe
+      ansible.builtin.fail:
+        msg: "VM '{{ final_vm_name }}' não encontrada no namespace '{{ final_vm_namespace }}'"
+      when: vm_check.resources | length == 0
+
+    - name: Extrair configuração da VM
+      ansible.builtin.set_fact:
+        current_vm: "{{ vm_check.resources[0] }}"
+        current_disks: "{{ vm_check.resources[0].spec.template.spec.domain.devices.disks | default([]) }}"
+
+    - name: Verificar se disco existe na VM
+      ansible.builtin.set_fact:
+        disk_exists: "{{ current_disks | selectattr('name', 'equalto', final_disk_name) | list | length > 0 }}"
+
+    - name: Falhar se disco não existe
+      ansible.builtin.fail:
+        msg: "Disco '{{ final_disk_name }}' não encontrado na VM '{{ final_vm_name }}'"
+      when: not disk_exists
+
+    - name: Verificar PVC atual
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        name: "{{ final_pvc_name }}"
+        namespace: "{{ final_vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: current_pvc
+
+    - name: Falhar se PVC não existe
+      ansible.builtin.fail:
+        msg: "PVC '{{ final_pvc_name }}' não encontrado no namespace '{{ final_vm_namespace }}'"
+      when: current_pvc.resources | length == 0
+
+    - name: Extrair tamanho atual do PVC
+      ansible.builtin.set_fact:
+        current_pvc_size: "{{ current_pvc.resources[0].spec.resources.requests.storage }}"
+        pvc_storage_class: "{{ current_pvc.resources[0].spec.storageClassName | default('managed-csi') }}"
+
+    - name: Verificar se Storage Class suporta expansão
+      kubernetes.core.k8s_info:
+        api_version: storage.k8s.io/v1
+        kind: StorageClass
+        name: "{{ pvc_storage_class }}"
+        validate_certs: "{{ validate_certs }}"
+      register: storage_class_info
+
+    - name: Verificar se expansão é suportada
+      ansible.builtin.assert:
+        that:
+          - storage_class_info.resources | length > 0
+          - storage_class_info.resources[0].allowVolumeExpansion | default(false)
+        fail_msg: |
+          Storage Class '{{ pvc_storage_class }}' não suporta expansão de volumes.
+          Verifique se allowVolumeExpansion está habilitado.
+        success_msg: "Storage Class suporta expansão de volumes"
+
+    - name: Converter tamanhos para comparação (em bytes)
+      ansible.builtin.set_fact:
+        current_size_bytes: >-
+          {%- if current_pvc_size.endswith('Gi') -%}
+            {{ (current_pvc_size[:-2] | int) * 1024 * 1024 * 1024 }}
+          {%- elif current_pvc_size.endswith('Mi') -%}
+            {{ (current_pvc_size[:-2] | int) * 1024 * 1024 }}
+          {%- elif current_pvc_size.endswith('Ti') -%}
+            {{ (current_pvc_size[:-2] | int) * 1024 * 1024 * 1024 * 1024 }}
+          {%- else -%}
+            {{ current_pvc_size | int }}
+          {%- endif -%}
+        new_size_bytes: >-
+          {%- if final_new_size.endswith('Gi') -%}
+            {{ (final_new_size[:-2] | int) * 1024 * 1024 * 1024 }}
+          {%- elif final_new_size.endswith('Mi') -%}
+            {{ (final_new_size[:-2] | int) * 1024 * 1024 }}
+          {%- elif final_new_size.endswith('Ti') -%}
+            {{ (final_new_size[:-2] | int) * 1024 * 1024 * 1024 * 1024 }}
+          {%- else -%}
+            {{ final_new_size | int }}
+          {%- endif -%}
+
+    - name: Verificar se novo tamanho é maior que atual
+      ansible.builtin.assert:
+        that:
+          - new_size_bytes | int > current_size_bytes | int
+        fail_msg: |
+          Novo tamanho ({{ final_new_size }}) deve ser maior que o atual ({{ current_pvc_size }})
+        success_msg: "Novo tamanho validado: {{ current_pvc_size }} → {{ final_new_size }}"
+
+    - name: Verificar se VM está rodando
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachineInstance
+        name: "{{ final_vm_name }}"
+        namespace: "{{ final_vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: vmi_check
+
+    - name: Definir status da VM
+      ansible.builtin.set_fact:
+        vm_is_running: "{{ vmi_check.resources | length > 0 }}"
+        vm_ip: "{{ vmi_check.resources[0].status.interfaces[0].ipAddress if vmi_check.resources | length > 0 and vmi_check.resources[0].status.interfaces is defined else '' }}"
+
+    - name: Expandir PVC
+      kubernetes.core.k8s:
+        state: present
+        validate_certs: "{{ validate_certs }}"
+        definition:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: "{{ final_pvc_name }}"
+            namespace: "{{ final_vm_namespace }}"
+          spec:
+            accessModes: "{{ current_pvc.resources[0].spec.accessModes }}"
+            volumeMode: "{{ current_pvc.resources[0].spec.volumeMode }}"
+            resources:
+              requests:
+                storage: "{{ final_new_size }}"
+            storageClassName: "{{ pvc_storage_class }}"
+      register: pvc_expansion
+
+    - name: Aguardar expansão do PVC
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        name: "{{ final_pvc_name }}"
+        namespace: "{{ final_vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+        wait: true
+        wait_condition:
+          type: Resizing
+          status: "False"
+        wait_timeout: "{{ operation_timeout }}"
+      register: pvc_expansion_wait
+      failed_when: false
+
+    - name: Verificar status da expansão do PVC
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        name: "{{ final_pvc_name }}"
+        namespace: "{{ final_vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: expanded_pvc
+
+    - name: Exibir status da expansão
+      ansible.builtin.debug:
+        msg:
+          - "=== STATUS DA EXPANSAO DO PVC ==="
+          - "PVC: {{ final_pvc_name }}"
+          - "Tamanho Anterior: {{ current_pvc_size }}"
+          - "Tamanho Solicitado: {{ final_new_size }}"
+          - "Tamanho Atual: {{ expanded_pvc.resources[0].status.capacity.storage | default('Expandindo...') }}"
+          - "Status: {{ expanded_pvc.resources[0].status.phase }}"
+
+    # Bloco de resize do filesystem (apenas se VM estiver rodando)
+    - name: Bloco de resize do filesystem
+      block:
+        - name: Verificar conectividade com a VM
+          ansible.builtin.wait_for:
+            host: "{{ vm_ip }}"
+            port: 22
+            timeout: 60
+          when: vm_ip != '' and (final_vm_username != '' or final_vm_ssh_key != '')
+
+        - name: Detectar dispositivo do disco na VM
+          ansible.builtin.shell: |
+            # Encontrar o dispositivo correspondente ao disco
+            lsblk -J | jq -r '.blockdevices[] | select(.children != null) | .children[] | select(.mountpoints != null and .mountpoints != []) | "\(.name) \(.mountpoints[0])"'
+          register: vm_devices
+          delegate_to: "{{ vm_ip }}"
+          remote_user: "{{ final_vm_username if final_vm_username != '' else 'root' }}"
+          vars:
+            ansible_ssh_private_key_file: "{{ final_vm_ssh_key if final_vm_ssh_key != '' else omit }}"
+            ansible_ssh_pass: "{{ final_vm_password if final_vm_password != '' and final_vm_ssh_key == '' else omit }}"
+          when: vm_ip != '' and (final_vm_username != '' or final_vm_ssh_key != '')
+          failed_when: false
+
+        - name: Detectar informações de LVM
+          ansible.builtin.shell: |
+            # Obter informações do VG e LV
+            vgs --noheadings --units b -o vg_name,vg_size,vg_free | head -1
+          register: vg_info
+          delegate_to: "{{ vm_ip }}"
+          remote_user: "{{ final_vm_username if final_vm_username != '' else 'root' }}"
+          vars:
+            ansible_ssh_private_key_file: "{{ final_vm_ssh_key if final_vm_ssh_key != '' else omit }}"
+            ansible_ssh_pass: "{{ final_vm_password if final_vm_password != '' and final_vm_ssh_key == '' else omit }}"
+          when: vm_ip != '' and (final_vm_username != '' or final_vm_ssh_key != '')
+          failed_when: false
+
+        - name: Detectar LV do mount point alvo
+          ansible.builtin.shell: |
+            {% if final_target_mount != '' %}
+            # Mount point específico fornecido
+            df {{ final_target_mount }} | tail -1 | awk '{print $1}' | sed 's|/dev/mapper/||'
+            {% else %}
+            # Auto-detectar o maior LV (provavelmente /home, /var, etc.)
+            lvs --noheadings --units b -o lv_name,lv_size,lv_path | sort -k2 -nr | head -1 | awk '{print $1}'
+            {% endif %}
+          register: target_lv
+          delegate_to: "{{ vm_ip }}"
+          remote_user: "{{ final_vm_username if final_vm_username != '' else 'root' }}"
+          vars:
+            ansible_ssh_private_key_file: "{{ final_vm_ssh_key if final_vm_ssh_key != '' else omit }}"
+            ansible_ssh_pass: "{{ final_vm_password if final_vm_password != '' and final_vm_ssh_key == '' else omit }}"
+          when: vm_ip != '' and (final_vm_username != '' or final_vm_ssh_key != '')
+          failed_when: false
+
+        - name: Rescan SCSI para detectar novo tamanho
+          ansible.builtin.shell: |
+            # Rescan todos os dispositivos SCSI
+            for host in /sys/class/scsi_host/host*; do
+              echo "- - -" > $host/scan
+            done
+            
+            # Rescan dispositivos existentes
+            for device in /sys/class/scsi_device/*/device/rescan; do
+              echo 1 > $device 2>/dev/null || true
+            done
+            
+            # Aguardar propagação
+            sleep 5
+          become: true
+          delegate_to: "{{ vm_ip }}"
+          remote_user: "{{ final_vm_username if final_vm_username != '' else 'root' }}"
+          vars:
+            ansible_ssh_private_key_file: "{{ final_vm_ssh_key if final_vm_ssh_key != '' else omit }}"
+            ansible_ssh_pass: "{{ final_vm_password if final_vm_password != '' and final_vm_ssh_key == '' else omit }}"
+          when: vm_ip != '' and (final_vm_username != '' or final_vm_ssh_key != '')
+          failed_when: false
+
+        - name: Expandir Physical Volume
+          ansible.builtin.shell: |
+            # Encontrar PVs e expandi-los
+            pvs --noheadings -o pv_name | while read pv; do
+              pvresize $pv
+            done
+          become: true
+          delegate_to: "{{ vm_ip }}"
+          remote_user: "{{ final_vm_username if final_vm_username != '' else 'root' }}"
+          vars:
+            ansible_ssh_private_key_file: "{{ final_vm_ssh_key if final_vm_ssh_key != '' else omit }}"
+            ansible_ssh_pass: "{{ final_vm_password if final_vm_password != '' and final_vm_ssh_key == '' else omit }}"
+          when: vm_ip != '' and (final_vm_username != '' or final_vm_ssh_key != '') and target_lv.stdout is defined
+          register: pv_resize_result
+          failed_when: false
+
+        - name: Expandir Logical Volume
+          ansible.builtin.shell: |
+            # Obter VG name
+            vg_name=$(vgs --noheadings -o vg_name | head -1 | xargs)
+            lv_name="{{ target_lv.stdout | trim }}"
+            
+            # Expandir LV para usar todo espaço livre disponível
+            lvextend -l +100%FREE /dev/$vg_name/$lv_name
+          become: true
+          delegate_to: "{{ vm_ip }}"
+          remote_user: "{{ final_vm_username if final_vm_username != '' else 'root' }}"
+          vars:
+            ansible_ssh_private_key_file: "{{ final_vm_ssh_key if final_vm_ssh_key != '' else omit }}"
+            ansible_ssh_pass: "{{ final_vm_password if final_vm_password != '' and final_vm_ssh_key == '' else omit }}"
+          when: vm_ip != '' and (final_vm_username != '' or final_vm_ssh_key != '') and target_lv.stdout is defined
+          register: lv_resize_result
+          failed_when: false
+
+        - name: Expandir filesystem XFS
+          ansible.builtin.shell: |
+            # Obter VG name e expandir filesystem
+            vg_name=$(vgs --noheadings -o vg_name | head -1 | xargs)
+            lv_name="{{ target_lv.stdout | trim }}"
+            
+            # Expandir XFS filesystem
+            xfs_growfs /dev/mapper/$vg_name-$lv_name
+          become: true
+          delegate_to: "{{ vm_ip }}"
+          remote_user: "{{ final_vm_username if final_vm_username != '' else 'root' }}"
+          vars:
+            ansible_ssh_private_key_file: "{{ final_vm_ssh_key if final_vm_ssh_key != '' else omit }}"
+            ansible_ssh_pass: "{{ final_vm_password if final_vm_password != '' and final_vm_ssh_key == '' else omit }}"
+          when: vm_ip != '' and (final_vm_username != '' or final_vm_ssh_key != '') and lv_resize_result is succeeded
+          register: xfs_resize_result
+          failed_when: false
+
+        - name: Verificar resultado do resize
+          ansible.builtin.shell: |
+            # Mostrar informações atualizadas
+            echo "=== INFORMACOES ATUALIZADAS ==="
+            echo "VG Info:"
+            vgs
+            echo ""
+            echo "LV Info:"
+            lvs
+            echo ""
+            echo "Disk Usage:"
+            df -h
+            echo ""
+            echo "Block Devices:"
+            lsblk
+          delegate_to: "{{ vm_ip }}"
+          remote_user: "{{ final_vm_username if final_vm_username != '' else 'root' }}"
+          vars:
+            ansible_ssh_private_key_file: "{{ final_vm_ssh_key if final_vm_ssh_key != '' else omit }}"
+            ansible_ssh_pass: "{{ final_vm_password if final_vm_password != '' and final_vm_ssh_key == '' else omit }}"
+          when: vm_ip != '' and (final_vm_username != '' or final_vm_ssh_key != '')
+          register: final_vm_status
+          failed_when: false
+
+      when: vm_is_running and (final_vm_username != '' or final_vm_ssh_key != '')
+
+    - name: Verificar status final do PVC
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        name: "{{ final_pvc_name }}"
+        namespace: "{{ final_vm_namespace }}"
+        validate_certs: "{{ validate_certs }}"
+      register: final_pvc_status
+
+    - name: Exibir resultado da operação
+      ansible.builtin.debug:
+        msg:
+          - "=== RESULTADO DA EXPANSAO ==="
+          - "✅ PVC expandido com sucesso!"
+          - "VM: {{ final_vm_name }}"
+          - "Namespace: {{ final_vm_namespace }}"
+          - "Disco: {{ final_disk_name }}"
+          - "PVC: {{ final_pvc_name }}"
+          - "Tamanho Anterior: {{ current_pvc_size }}"
+          - "Tamanho Atual: {{ final_pvc_status.resources[0].status.capacity.storage }}"
+          - "VM Status: {{ 'Running' if vm_is_running else 'Stopped' }}"
+          - ""
+          - "{% if vm_is_running and (final_vm_username != '' or final_vm_ssh_key != '') %}✅ Filesystem expandido automaticamente{% else %}⚠️  VM parada ou credenciais não fornecidas - resize manual necessário{% endif %}"
+
+    - name: Exibir instruções para resize manual (se necessário)
+      ansible.builtin.debug:
+        msg:
+          - "=== INSTRUCOES PARA RESIZE MANUAL ==="
+          - "Se a VM estiver parada ou o resize automático falhou, execute os comandos abaixo dentro da VM:"
+          - ""
+          - "1. Rescan SCSI devices:"
+          - "   for host in /sys/class/scsi_host/host*; do echo '- - -' > $host/scan; done"
+          - ""
+          - "2. Expandir Physical Volumes:"
+          - "   pvresize /dev/sdb /dev/sdc /dev/sdd  # (ajustar conforme seus PVs)"
+          - ""
+          - "3. Expandir Logical Volume:"
+          - "   lvextend -l +100%FREE /dev/vg9sda30022/home  # (ajustar VG/LV)"
+          - ""
+          - "4. Expandir filesystem XFS:"
+          - "   xfs_growfs /dev/mapper/vg9sda30022-home  # (ajustar path)"
+          - ""
+          - "5. Verificar resultado:"
+          - "   df -h"
+          - "   lsblk"
+      when: not vm_is_running or final_vm_username == ''
+
+    - name: Exibir comandos úteis
+      ansible.builtin.debug:
+        msg:
+          - "=== COMANDOS UTEIS ==="
+          - "Ver PVC:"
+          - "  oc get pvc {{ final_pvc_name }} -n {{ final_vm_namespace }}"
+          - ""
+          - "Ver VM:"
+          - "  oc get vm {{ final_vm_name }} -n {{ final_vm_namespace }}"
+          - ""
+          - "Ver VMI (se rodando):"
+          - "  oc get vmi {{ final_vm_name }} -n {{ final_vm_namespace }}"
+          - ""
+          - "Console da VM:"
+          - "  virtctl console {{ final_vm_name }} -n {{ final_vm_namespace }}"
+          - ""
+          - "Verificar dentro da VM:"
+          - "  lsblk && df -h && vgs && lvs"
+
+    - name: Exibir status final da VM (se disponível)
+      ansible.builtin.debug:
+        msg:
+          - "=== STATUS FINAL DA VM ==="
+          - "{{ final_vm_status.stdout_lines }}"
+      when: final_vm_status is defined and final_vm_status.stdout_lines is defined

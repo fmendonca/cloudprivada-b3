@@ -1,0 +1,45 @@
+---
+- name: create_nad2 - Criar NAD com parâmetros fornecidos
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  # Remova a seção vars_prompt, pois as variáveis virão do survey do AAP
+
+  tasks:
+    - name: Debug - Verificar variáveis recebidas
+      debug:
+        msg: |
+          NAD Name: {{ nad_name }}
+          VLAN ID: {{ vlan_id }}
+          Target Namespace: {{ target_namespace }}
+          Logical Switch: {{ logical_switch }}
+          MTU: {{ mtu }}
+          Interface Type: {{ interface_type }}
+
+    - name: create_nad2 - Criar objeto NAD no OpenShift
+      kubernetes.core.k8s:
+        state: present
+        namespace: "{{ target_namespace }}"
+        definition: |
+          apiVersion: "k8s.cni.cncf.io/v1"
+          kind: NetworkAttachmentDefinition
+          metadata:
+            name: "{{ nad_name }}"
+            namespace: "{{ target_namespace }}"
+          spec:
+            config: |
+              {
+                "cniVersion": "0.3.1",
+                "type": "{{ interface_type }}",
+                "name": "{{ nad_name }}",
+                "bridge": "br{{ vlan_id }}",
+                "vlan": {{ vlan_id }},
+                "mtu": {{ mtu }},
+                "logicalSwitch": "{{ logical_switch }}",
+                "ipam": {
+                  "type": "static",
+                  "addresses": []
+                }
+              }
+      tags: [create_nad2]

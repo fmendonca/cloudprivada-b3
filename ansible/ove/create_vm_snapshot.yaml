@@ -1,16 +1,23 @@
 ---
 - name: Criar Snapshot de VM no OpenShift Virtualization
   hosts: localhost
-  gather_facts: false
   connection: local
+  gather_facts: true
 
   vars:
     validate_certs: false
-    wait_for_completion: true
-    snapshot_timeout: 600
 
   tasks:
-    - name: Validar variáveis obrigatórias
+
+    - name: Coletar facts do localhost (necessário para ansible_date_time)
+      ansible.builtin.setup:
+
+    - name: Definir variáveis de timestamp
+      ansible.builtin.set_fact:
+        snapshot_epoch: "{{ ansible_date_time.epoch }}"
+        snapshot_iso8601: "{{ ansible_date_time.iso8601 }}"
+
+    - name: Validar variáveis obrigatórias vindas do Survey
       ansible.builtin.assert:
         that:
           - vm_name is defined
@@ -24,7 +31,7 @@
 
     - name: Definir nome do snapshot com timestamp se necessário
       ansible.builtin.set_fact:
-        final_snapshot_name: "{{ snapshot_name }}-{{ ansible_date_time.epoch }}"
+        final_snapshot_name: "{{ snapshot_name }}-{{ snapshot_epoch }}"
       when: add_timestamp | default(false) | bool
 
     - name: Usar nome do snapshot original
@@ -40,8 +47,11 @@
           - "Namespace: {{ vm_namespace }}"
           - "Snapshot: {{ final_snapshot_name }}"
           - "Descrição: {{ snapshot_description | default('Snapshot criado via Ansible') }}"
-          - "Aguardar conclusão: {{ wait_for_completion }}"
-          - "Timeout: {{ snapshot_timeout }}s"
+          - "Aguardar conclusão: {{ wait_for_completion | default(false) | bool }}"
+          - "Timeout: {{ snapshot_timeout | default(300) }}s"
+          - "Sobrescrever existente: {{ overwrite_existing | default(false) | bool }}"
+          - "DeletionPolicy: {{ deletion_policy | default('Retain') }}"
+          - "Tipo: {{ snapshot_type | default('manual') }}"
 
     - name: Verificar se a VM existe
       kubernetes.core.k8s_info:
@@ -92,7 +102,7 @@
         validate_certs: "{{ validate_certs }}"
         wait: true
         wait_timeout: 120
-      when: 
+      when:
         - existing_snapshot.resources | length > 0
         - overwrite_existing | default(false) | bool
 
@@ -121,7 +131,7 @@
               snapshot-type: "{{ snapshot_type | default('manual') }}"
             annotations:
               description: "{{ snapshot_description | default('Snapshot criado via Ansible Automation Platform') }}"
-              created-at: "{{ ansible_date_time.iso8601 }}"
+              created-at: "{{ snapshot_iso8601 }}"
               vm-status: "{{ 'running' if vm_running else 'stopped' }}"
           spec:
             source:
@@ -130,11 +140,11 @@
               name: "{{ vm_name }}"
             deletionPolicy: "{{ deletion_policy | default('Retain') }}"
         validate_certs: "{{ validate_certs }}"
-        wait: "{{ wait_for_completion }}"
+        wait: "{{ wait_for_completion | default(false) | bool }}"
         wait_condition:
           type: Ready
           status: "True"
-        wait_timeout: "{{ snapshot_timeout }}"
+        wait_timeout: "{{ snapshot_timeout | default(300) }}"
       register: snapshot_result
 
     - name: Aguardar conclusão do snapshot (se habilitado)
@@ -147,9 +157,9 @@
         wait_condition:
           type: Ready
           status: "True"
-        wait_timeout: "{{ snapshot_timeout }}"
+        wait_timeout: "{{ snapshot_timeout | default(300) }}"
       register: snapshot_status
-      when: wait_for_completion
+      when: wait_for_completion | default(false) | bool
 
     - name: Obter detalhes do snapshot criado
       kubernetes.core.k8s_info:
@@ -160,6 +170,13 @@
         validate_certs: "{{ validate_certs }}"
       register: final_snapshot
 
+    - name: Definir texto de status do snapshot
+      ansible.builtin.set_fact:
+        snapshot_status_text: >-
+          {{ (final_snapshot.resources | length > 0)
+             | ternary(final_snapshot.resources[0].status.phase | default('Unknown'),
+                       'Created') }}
+
     - name: Exibir resultado da operação
       ansible.builtin.debug:
         msg:
@@ -168,24 +185,8 @@
           - "Nome: {{ final_snapshot_name }}"
           - "Namespace: {{ vm_namespace }}"
           - "VM: {{ vm_name }}"
-          - "Status: {{ final_snapshot.resources[0].status.phase | default('Unknown') if final_snapshot.resources | length > 0 else 'Created' }}"
-          - "Timestamp: {{ ansible_date_time.iso8601 }}"
-
-    - name: Exibir comandos úteis
-      ansible.builtin.debug:
-        msg:
-          - "=== COMANDOS ÚTEIS ==="
-          - "Verificar status:"
-          - "  oc get vmsnapshot {{ final_snapshot_name }} -n {{ vm_namespace }}"
-          - ""
-          - "Ver detalhes:"
-          - "  oc describe vmsnapshot {{ final_snapshot_name }} -n {{ vm_namespace }}"
-          - ""
-          - "Listar todos os snapshots da VM:"
-          - "  oc get vmsnapshot -n {{ vm_namespace }} -l vm-name={{ vm_name }}"
-          - ""
-          - "Para restaurar (criar VMRestore):"
-          - "  oc apply -f vmrestore-{{ final_snapshot_name }}.yaml"
+          - "Status: {{ snapshot_status_text }}"
+          - "Timestamp: {{ snapshot_iso8601 }}"
 
     - name: Listar snapshots existentes da VM
       kubernetes.core.k8s_info:

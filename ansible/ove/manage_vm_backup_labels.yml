@@ -1,0 +1,192 @@
+---
+- name: Gerenciar label Backup em VM, PVC e PV da OpenShift Virtualization
+  hosts: localhost
+  gather_facts: no
+  vars:
+    vm_name: ""         # Será preenchido via survey
+    vm_namespace: ""    # Será preenchido via survey
+    backup_state: "present"  # present ou absent - será preenchido via survey
+
+  tasks:
+    - name: Validar parâmetros obrigatórios
+      assert:
+        that:
+          - vm_name | length > 0
+          - vm_namespace | length > 0
+          - backup_state in ['present', 'absent']
+        fail_msg: "Os parâmetros vm_name, vm_namespace e backup_state são obrigatórios"
+
+    - name: Obter detalhes da VirtualMachine
+      k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+      register: vm_info
+
+    - name: Verificar se a VM existe
+      assert:
+        that:
+          - vm_info.resources | length > 0
+        fail_msg: "VirtualMachine '{{ vm_name }}' não encontrada no namespace '{{ vm_namespace }}'"
+
+    - name: Extrair nomes dos PVCs usados pela VM (DataVolumeTemplates)
+      set_fact:
+        vm_pvcs: "{{ vm_info.resources[0].spec.dataVolumeTemplates | default([]) | map(attribute='metadata.name') | list }}"
+
+    - name: Extrair PVCs de volumes com PersistentVolumeClaims
+      set_fact:
+        vm_pvcs: >-
+          {{
+            vm_pvcs +
+            (
+              vm_info.resources[0].spec.template.spec.volumes | selectattr('persistentVolumeClaim', 'defined') | map(attribute='persistentVolumeClaim.claimName') | list
+              if vm_info.resources[0].spec.template.spec.volumes is defined else []
+            )
+          }}
+
+    # ============== ADICIONAR LABELS (PRESENT) ==============
+    - name: Adicionar label Backup na VirtualMachine
+      kubernetes.core.k8s:
+        state: patched
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+        definition:
+          metadata:
+            labels:
+              Backup: "Com-Backup"
+      when: backup_state == 'present'
+
+    - name: Adicionar label Backup nos PVCs
+      kubernetes.core.k8s:
+        state: patched
+        api_version: v1
+        kind: PersistentVolumeClaim
+        name: "{{ item }}"
+        namespace: "{{ vm_namespace }}"
+        definition:
+          metadata:
+            labels:
+              Backup: "Com-Backup"
+      loop: "{{ vm_pvcs }}"
+      when: 
+        - backup_state == 'present'
+        - vm_pvcs | length > 0
+
+    # ============== REMOVER LABELS (ABSENT) ==============
+    - name: Remover label Backup da VirtualMachine
+      kubernetes.core.k8s_json_patch:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+        patch:
+          - op: remove
+            path: /metadata/labels/Backup
+      when: backup_state == 'absent'
+      ignore_errors: yes
+
+    - name: Obter informações atuais dos PVCs para remoção
+      k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        namespace: "{{ vm_namespace }}"
+        name: "{{ item }}"
+      loop: "{{ vm_pvcs }}"
+      register: pvc_current_info
+      when: 
+        - backup_state == 'absent'
+        - vm_pvcs | length > 0
+
+    - name: Remover label Backup dos PVCs
+      kubernetes.core.k8s:
+        state: present
+        api_version: v1
+        kind: PersistentVolumeClaim
+        name: "{{ item.resources[0].metadata.name }}"
+        namespace: "{{ vm_namespace }}"
+        definition:
+          metadata:
+            labels: "{{ item.resources[0].metadata.labels | default({}) | dict2items | rejectattr('key', 'equalto', 'Backup') | list | items2dict }}"
+      loop: "{{ pvc_current_info.results }}"
+      when: 
+        - backup_state == 'absent'
+        - vm_pvcs | length > 0
+        - item.resources | length > 0
+
+    # ============== PROCESSAR PVs ==============
+    - name: Obter PVCs para extrair os PVs
+      k8s_info:
+        api_version: v1
+        kind: PersistentVolumeClaim
+        namespace: "{{ vm_namespace }}"
+        name: "{{ item }}"
+      loop: "{{ vm_pvcs }}"
+      register: pvc_details
+      when: vm_pvcs | length > 0
+
+    - name: Extrair nomes dos PVs de cada PVC
+      set_fact:
+        pv_names: "{{ pvc_details.results | map(attribute='resources') | map('first') | map(attribute='spec.volumeName') | list }}"
+      when: 
+        - vm_pvcs | length > 0
+        - pvc_details.results is defined
+
+    - name: Adicionar label Backup nos PVs
+      kubernetes.core.k8s:
+        state: patched
+        api_version: v1
+        kind: PersistentVolume
+        name: "{{ item }}"
+        definition:
+          metadata:
+            labels:
+              Backup: "Com-Backup"
+      loop: "{{ pv_names | default([]) }}"
+      when: 
+        - backup_state == 'present'
+        - pv_names is defined
+        - pv_names | length > 0
+
+    - name: Obter informações atuais dos PVs para remoção
+      k8s_info:
+        api_version: v1
+        kind: PersistentVolume
+        name: "{{ item }}"
+      loop: "{{ pv_names | default([]) }}"
+      register: pv_current_info
+      when: 
+        - backup_state == 'absent'
+        - pv_names is defined
+        - pv_names | length > 0
+
+    - name: Remover label Backup dos PVs
+      kubernetes.core.k8s:
+        state: present
+        api_version: v1
+        kind: PersistentVolume
+        name: "{{ item.resources[0].metadata.name }}"
+        definition:
+          metadata:
+            labels: "{{ item.resources[0].metadata.labels | default({}) | dict2items | rejectattr('key', 'equalto', 'Backup') | list | items2dict }}"
+      loop: "{{ pv_current_info.results }}"
+      when: 
+        - backup_state == 'absent'
+        - pv_names is defined
+        - pv_names | length > 0
+        - item.resources | length > 0
+
+    - name: Exibir resumo da operação
+      debug:
+        msg:
+          - "=== Operação concluída com sucesso ==="
+          - "VM: {{ vm_name }}"
+          - "Namespace: {{ vm_namespace }}"
+          - "Ação: {{ 'Adicionado' if backup_state == 'present' else 'Removido' }} label Backup=Com-Backup"
+          - "PVCs processados: {{ vm_pvcs | length }}"
+          - "PVs processados: {{ pv_names | default([]) | length }}"
+          - "---"
+          - "PVCs: {{ vm_pvcs | join(', ') if vm_pvcs | length > 0 else 'Nenhum' }}"
+          - "PVs: {{ pv_names | join(', ') if pv_names is defined and pv_names | length > 0 else 'Nenhum' }}"

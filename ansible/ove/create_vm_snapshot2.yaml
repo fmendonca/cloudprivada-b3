@@ -1,0 +1,75 @@
+---
+- name: OpenShift Multi-VM Snapshot Automation (v6.9)
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  collections:
+    - kubernetes.core
+
+  vars:
+    # Recebido via survey (ex: "vm1,vm2,vm3")
+    vm_names_raw: "{{ vm_name }}"
+    vm_names: "{{ vm_names_raw.split(',') | map('trim') | list }}"
+
+    # Nome do snapshot (survey: Snapshot Name) – default "snapshot"
+    user_snapshot_name: "{{ snapshot_name | default('snapshot') }}"
+
+    # Booleans vindos do survey (multiplechoice: "true"/"false")
+    wait_for_completion: "{{ wait_for_completion | default(true) | bool }}"
+    overwrite_snapshot_bool: "{{ overwrite_snapshot | bool }}"
+
+    # Timestamp para compor o nome do snapshot (quando user_snapshot_name == 'snapshot')
+    timestamp: >-
+      {{ ansible_date_time.date | replace('-', '') }}-{{ ansible_date_time.time | regex_replace(':','') }}
+
+    # Descrição do snapshot (survey: "Descrição do Snapshot" com variable_name: snapshot_description)
+    vm_snapshot_description: "{{ snapshot_description | default('') }}"
+
+    # Annotations que serão aplicadas no VirtualMachineSnapshot
+    # Se a descrição estiver vazia, fica {} e não adiciona nada.
+    vm_snapshot_annotations: >-
+      {{
+        {
+          'snapshot.kubevirt.io/description': vm_snapshot_description
+        }
+        if vm_snapshot_description | length > 0
+        else {}
+      }}
+
+  tasks:
+
+    - name: Validar variável obrigatória 'vm_name'
+      fail:
+        msg: "Variável obrigatória 'vm_name' não fornecida."
+      when: vm_name is not defined or vm_name | length == 0
+
+    - name: Buscar todas as VMs em todos os namespaces
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+      register: all_vms
+
+    - name: Construir lista com VMs e namespaces existentes
+      set_fact:
+        vms_with_ns: "{{ vms_with_ns | default([]) + [{'name': item.metadata.name, 'namespace': item.metadata.namespace}] }}"
+      loop: "{{ all_vms.resources }}"
+      when: item.metadata.name in vm_names
+
+    - name: Validar se todas as VMs foram encontradas
+      fail:
+        msg: >-
+          As seguintes VMs não foram encontradas:
+          {{ vm_names | difference(vms_with_ns | map(attribute='name') | list) }}
+      when: (vm_names | difference(vms_with_ns | map(attribute='name') | list)) | length > 0
+
+    - name: Exibir VMs detectadas
+      debug:
+        var: vms_with_ns
+
+    - name: Executar criação de snapshot para cada VM
+      include_tasks: snapshot_logic.yml
+      loop: "{{ vms_with_ns }}"
+      loop_control:
+        loop_var: vm_data
+        label: "{{ vm_data.name }}"

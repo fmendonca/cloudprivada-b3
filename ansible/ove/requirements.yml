@@ -1,10 +1,10 @@
 ---
 collections:
+  - name: kubernetes.core
+    version: "2.4.0"
   - name: redhat.openshift
-    version: 5.0.0
-    source: redhat_sync
+    version: "5.0.0"
   - name: redhat.openshift_virtualization
-    version: 2.2.3
-    source: redhat_sync
+    version: "2.2.3"
   - name: community.general
-    source: community
+    version: "8.0.0"

@@ -1,0 +1,67 @@
+---
+- name: Hot plug de recursos VM usando kubevirt_vm
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  vars:
+    vm_name: "{{ survey_vm_name }}"
+    vm_namespace: "{{ survey_vm_namespace }}"
+    update_vcpu: "{{ survey_update_vcpu | default(false) | bool }}"
+    new_cpu_cores: "{{ survey_new_cpu_cores | default(1) | int }}"
+    update_memory: "{{ survey_update_memory | default(false) | bool }}"
+    new_memory: "{{ survey_new_memory | default('1Gi') }}"
+
+  tasks:
+    - name: Validar parâmetros
+      assert:
+        that:
+          - vm_name != ""
+          - vm_namespace != ""
+          - (update_vcpu | bool) or (update_memory | bool)
+
+    - name: Obter configuração atual da VM
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        kind: VirtualMachine
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+      register: vm_current
+
+    - name: Definir valores atuais
+      set_fact:
+        current_cpu: "{{ vm_current.resources[0].spec.template.spec.domain.cpu.cores }}"
+        current_memory: "{{ vm_current.resources[0].spec.template.spec.domain.resources.requests.memory | default('1Gi') }}"
+        vm_is_running: "{{ vm_current.resources[0].status.ready | default(false) }}"
+
+    - name: Definir valores finais
+      set_fact:
+        target_cpu: "{{ new_cpu_cores if update_vcpu else current_cpu }}"
+        target_memory: "{{ new_memory if update_memory else current_memory }}"
+
+    - name: Exibir mudanças a serem aplicadas
+      debug:
+        msg:
+          - "VM: {{ vm_name }} (Namespace: {{ vm_namespace }})"
+          - "Status: {{ 'Rodando' if vm_is_running else 'Parada' }}"
+          - "{% if update_vcpu %}CPU: {{ current_cpu }} -> {{ target_cpu }} cores{% endif %}"
+          - "{% if update_memory %}Memória: {{ current_memory }} -> {{ target_memory }}{% endif %}"
+
+    - name: Aplicar mudanças usando kubevirt_vm
+      kubevirt_vm:
+        state: present
+        name: "{{ vm_name }}"
+        namespace: "{{ vm_namespace }}"
+        cpu_cores: "{{ target_cpu | int }}"
+        memory: "{{ target_memory }}"
+        running: "{{ vm_is_running }}"
+      register: update_result
+
+    - name: Exibir resultado
+      debug:
+        msg:
+          - "Operação concluída!"
+          - "Status: {{ 'Alterado' if update_result.changed else 'Sem alterações' }}"
+          - "{% if update_vcpu %}CPU configurada para: {{ target_cpu }} cores{% endif %}"
+          - "{% if update_memory %}Memória configurada para: {{ target_memory }}{% endif %}"
+          - "VM manteve estado de execução durante a operação"
