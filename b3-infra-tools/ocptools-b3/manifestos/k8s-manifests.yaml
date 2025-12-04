@@ -60,7 +60,7 @@ spec:
         runAsNonRoot: true
       containers:
         - name: vm-inventory
-          image: "quay.io/fcalomen/ocptools:1.0.0"
+          image: "quay.io/fcalomen/ocptools-b3:1.0.2"
           imagePullPolicy: Always
           ports:
             - name: http
